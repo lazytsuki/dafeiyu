@@ -70,6 +70,19 @@
    - `/fy 写说说 [主题]` → `/fy 发 1` 或 `/fy 弃 1`
    - `/fy 反思`（测试用：立刻反思今天，只回一句，不透露内容）
 
+## 开机自启
+
+1. 新建 `runtime\local.bat`（本机私有，不进仓库）：
+   ```bat
+   set "QQ_PATH=D:\你的\QQ.exe"
+   set "BOT_QQ=小号QQ号"
+   ```
+2. `scripts\start-dafeiyu.bat` 一键启动（已在运行的会跳过），`scripts\stop-dafeiyu.bat` 停止（不影响你自己开的 QQ）。
+3. 在任务计划程序里建一个「登录时」触发、延迟 30 秒、不限运行时长的任务，执行 `cmd /c C:\dafeiyu\scripts\start-dafeiyu.bat`。
+4. 后台运行时看日志：AstrBot 配置里开 `log_file_enable`，日志在 `runtime\astrbot\data\logs\astrbot.log`。
+
+资源参考（实测）：AstrBot 约 270 MB 内存，NapCat 挂的 QQ 约 470 MB，空闲时 CPU 接近 0；磁盘约 1 GB（AstrBot 环境 500 MB + 运行数据 + 小号 QQ 数据）。
+
 ## 防封建议
 
 - 主动私聊默认每天随机最多 4 次，外加两条固定问候；说说默认每天 2 条且需要你审核，时间随机偏移。别调得太频繁。
