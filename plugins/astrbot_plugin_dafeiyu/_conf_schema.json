@@ -5,16 +5,35 @@
     "default": "",
     "hint": "只有这个号能用 /fy 指令，主动私聊也只发给它。填好后用大号私聊小号说一句话，插件就会记住会话。"
   },
-  "persona_override": {
-    "description": "人设（留空则使用插件自带的 persona.md）",
+  "name": {
+    "description": "你给它起的名字",
+    "type": "string",
+    "default": "大肥鱼",
+    "hint": "「大肥鱼」是它的种类，这里填你养的这一条的名字。只存在本机，不进仓库。"
+  },
+  "owner_wishes": {
+    "description": "你想对它说的话（期望，不是命令）",
     "type": "text",
-    "default": ""
+    "default": "",
+    "hint": "反思时它会读到，并自己决定接不接受。"
+  },
+  "reflect_time": {
+    "description": "每晚反思的时间",
+    "type": "string",
+    "default": "03:30",
+    "hint": "回想前一天的对话，写日记、慢慢改写对自己的认识。留空则不反思。"
+  },
+  "reflect_provider_id": {
+    "description": "反思用的模型 ID（留空用默认模型）",
+    "type": "string",
+    "default": "",
+    "hint": "反思一天只跑一次，可以用更强的模型，比如 deepseek/deepseek-v4-pro"
   },
   "sync_persona": {
-    "description": "启动时把人设同步到 AstrBot 默认人格",
+    "description": "启动时把内核同步到 AstrBot 默认人格",
     "type": "bool",
     "default": true,
-    "hint": "开着则日常聊天也用大肥鱼人设；想在面板「人格设定」里自己管理就关掉"
+    "hint": "开着则日常聊天也用它的内核和自我认识；想在面板「人格设定」里自己管理就关掉"
   },
   "split_bubbles": {
     "description": "主动消息按换行拆成多条发送",

@@ -17,10 +17,13 @@ DEFAULT = {
     "drafts": {},             # 待审核说说草稿 {id: text}
     "next_draft_id": 1,
     "posted": [],             # 已发说说 [{"t": ts, "tid": ..., "text": ...}]
+    "reflected_day": "",      # 夜间反思已处理到哪一天
+    "reflect_offsets": {},    # 每天的对话已经反思到第几行 {day: n}
+    "thoughts": [],           # 它心里还没说出口的话，说不说由它自己
 }
 
 
-def _data_dir() -> Path:
+def data_dir() -> Path:
     try:
         from astrbot.api.star import StarTools
 
@@ -31,10 +34,10 @@ def _data_dir() -> Path:
 
 class Store:
     def __init__(self):
-        d = _data_dir()
+        d = data_dir()
         d.mkdir(parents=True, exist_ok=True)
         self.path = d / "state.json"
-        self.data = dict(DEFAULT)
+        self.data = json.loads(json.dumps(DEFAULT))  # 深拷贝，别让默认值被改掉
         if self.path.exists():
             try:
                 self.data.update(json.loads(self.path.read_text("utf-8")))
