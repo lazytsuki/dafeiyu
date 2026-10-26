@@ -165,7 +165,10 @@ class Dafeiyu(Star):
         text = await self.write_post()
         if not text:
             return
-        if self.cfg.get("qzone_review", True) and self.store["owner_umo"]:
+        if self.cfg.get("qzone_review", True):
+            if not self.store["owner_umo"]:
+                logger.warning("[大肥鱼] 说说需要审核，但还没记住主人会话，本次跳过")
+                return
             did = str(self.store["next_draft_id"])
             self.store["next_draft_id"] += 1
             self.store["drafts"][did] = text
@@ -198,10 +201,15 @@ class Dafeiyu(Star):
         self.store["day"] = today
         self.store["proactive_count"] = 0
         self.store["fixed_done"] = []
-        self.store["qzone_done"] = []
         self.store["qzone_slots"] = {
             t: random.randint(-off, off) for t in self.cfg.get("qzone_times") or []
         }
+        # 启动时已经错过的时间点不补发，免得一开机就连发
+        self.store["qzone_done"] = [
+            t
+            for t, o in self.store["qzone_slots"].items()
+            if now > dt.datetime.combine(now.date(), _hm(t)) + dt.timedelta(minutes=o + FIXED_WINDOW_MINUTES)
+        ]
         self.store.save()
 
     async def _tick(self):
