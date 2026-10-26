@@ -1,5 +1,6 @@
 @echo off
-REM One-click start: AstrBot first, then NapCat, both minimized. Skips whatever is already running.
+REM One-click start: AstrBot first, then NapCat. Skips whatever is already running.
+REM Both share this console: run start-dafeiyu.vbs instead to keep everything hidden.
 REM Machine-specific settings live in runtime\local.bat (not in git):
 REM   set "QQ_PATH=D:\path\to\QQ.exe"
 REM   set "BOT_QQ=your bot QQ number"
@@ -19,11 +20,11 @@ if not exist "%PY%" (
 
 powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'astrbot\.cli run' }) { exit 0 } else { exit 1 }"
 if errorlevel 1 (
-    start "dafeiyu-astrbot" /min /d "%ROOT%\runtime\astrbot" "%PY%" -m astrbot.cli run
-    timeout /t 15 /nobreak >nul
+    start "" /b /d "%ROOT%\runtime\astrbot" "%PY%" -m astrbot.cli run
+    ping -n 16 127.0.0.1 >nul
 )
 
 powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'QQ.exe' -and $_.CommandLine -match '-q %BOT_QQ%' }) { exit 0 } else { exit 1 }"
 if errorlevel 1 (
-    start "dafeiyu-napcat" /min cmd /c ""%~dp0start-napcat.bat" "%QQ_PATH%" %BOT_QQ%"
+    start "" /b cmd /c ""%~dp0start-napcat.bat" "%QQ_PATH%" %BOT_QQ%"
 )

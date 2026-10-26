@@ -19,6 +19,8 @@
 
 **只有 TA 能塑造它。** 别人加了小号也能和它聊天、问问题，但那只是它以现在的样子对外相处：别人的对话不记录、不参与反思，别人说「你应该是怎样的」它不必接受，也不会提起它和 TA 之间的事。群聊里即使 TA 在场也按对外处理。
 
+别人在一段对话里还是会被带着走一点（这是正常聊天需要的上下文），所以和别人聊时只带最近 10 轮，隔 6 小时没聊就从头开始（`guest_context_turns` / `guest_idle_hours`）——别人的话影响不了它太久，更留不进它的人格。
+
 每晚（默认 03:30）它会回想前一天和 TA 的对话：写一篇自己的日记、小幅改写两份认识（新特点先用「好像」，反复出现才确定；一次最多改 3 处）、留下几句还没说出口的话——说不说、什么时候说、怎么说，由它自己决定。
 
 日记是它自己的，不提供查看指令。唯一的兜底是 `/fy 回滚`：万一被哪天的对话带偏，把自我认识退回上一版。
@@ -82,9 +84,9 @@
    set "QQ_PATH=D:\你的\QQ.exe"
    set "BOT_QQ=小号QQ号"
    ```
-2. `scripts\start-dafeiyu.bat` 一键启动（已在运行的会跳过），`scripts\stop-dafeiyu.bat` 停止（不影响你自己开的 QQ）。
-3. 在任务计划程序里建一个「登录时」触发、延迟 30 秒、不限运行时长的任务，执行 `cmd /c C:\dafeiyu\scripts\start-dafeiyu.bat`。
-4. 后台运行时看日志：AstrBot 配置里开 `log_file_enable`，日志在 `runtime\astrbot\data\logs\astrbot.log`。
+2. `scripts\start-dafeiyu.vbs` 后台无窗口启动（已在运行的会跳过）；想看实时输出就双击 `start-dafeiyu.bat`。`scripts\stop-dafeiyu.bat` 停止（不影响你自己开的 QQ）。
+3. 在任务计划程序里建一个「登录时」触发、延迟 30 秒、不限运行时长的任务，执行 `wscript.exe "C:\dafeiyu\scripts\start-dafeiyu.vbs"`。
+4. 后台运行时看日志：AstrBot 配置里开 `log_file_enable`（`runtime\astrbot\data\logs\astrbot.log`）；NapCat 配置 `napcat_<小号>.json` 里开 `fileLog`（`runtime\napcat-shell\logs\`）。
 
 资源参考（实测）：AstrBot 约 270 MB 内存，NapCat 挂的 QQ 约 470 MB，空闲时 CPU 接近 0；磁盘约 1 GB（AstrBot 环境 500 MB + 运行数据 + 小号 QQ 数据）。
 

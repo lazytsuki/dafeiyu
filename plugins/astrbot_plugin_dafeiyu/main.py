@@ -426,6 +426,22 @@ class Dafeiyu(Star):
 
     # ---------- 钩子 ----------
 
+    def _trim_guest_context(self, event: AstrMessageEvent, req: ProviderRequest):
+        """别人的对话只带最近几轮，隔久了就从头聊：别人的话影响不了它太久。"""
+        umo = event.unified_msg_origin
+        now = time.time()
+        seen = self.store["guest_seen"]
+        idle_h = float(self.cfg.get("guest_idle_hours", 6))
+        if idle_h > 0 and now - seen.get(umo, now) > idle_h * 3600:
+            req.contexts = []
+        turns = int(self.cfg.get("guest_context_turns", 10))
+        if turns > 0 and len(req.contexts) > turns * 2:
+            req.contexts = req.contexts[-turns * 2 :]
+        seen[umo] = now
+        if len(seen) > 200:
+            self.store["guest_seen"] = dict(sorted(seen.items(), key=lambda kv: kv[1])[-200:])
+        self.store.save()
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         # 它对自己的认识每晚都可能变，所以每次请求现拼
@@ -434,6 +450,7 @@ class Dafeiyu(Star):
             # 别人（或群里）：只展示已经长成的自己；不带和 TA 的私事，也不进成长记录
             who = event.get_sender_name() or str(event.get_sender_id())
             where = "群里" if not event.is_private_chat() else "私聊里"
+            self._trim_guest_context(event, req)
             if self._is_owner(event):
                 req.system_prompt += "\n\n（TA 现在在群里和你说话，旁边还有别人。你们之间的私事不在这里说。）"
             else:

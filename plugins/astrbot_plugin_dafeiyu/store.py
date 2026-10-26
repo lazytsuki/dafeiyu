@@ -20,6 +20,7 @@ DEFAULT = {
     "reflected_day": "",      # 夜间反思已处理到哪一天
     "reflect_offsets": {},    # 每天的对话已经反思到第几行 {day: n}
     "thoughts": [],           # 它心里还没说出口的话，说不说由它自己
+    "guest_seen": {},         # 别人（和群）最后一次对话的时间 {umo: ts}
 }
 
 
