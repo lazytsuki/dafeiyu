@@ -305,6 +305,7 @@ class Dafeiyu(Star):
     @fy.command("状态")
     async def cmd_status(self, event: AstrMessageEvent):
         if not self._is_owner(event):
+            event.stop_event()
             return
         s = self.store
         yield event.plain_result(
@@ -319,13 +320,16 @@ class Dafeiyu(Star):
     async def cmd_poke(self, event: AstrMessageEvent):
         """立刻触发一次主动私聊，用来测试。"""
         if not self._is_owner(event):
+            event.stop_event()
             return
         self.store["owner_umo"] = event.unified_msg_origin
         await self.proactive("测试一下主动找主人聊天")
+        event.stop_event()  # 否则这条指令还会被当成普通聊天再回一句
 
     @fy.command("写说说")
     async def cmd_write(self, event: AstrMessageEvent, topic: str = ""):
         if not self._is_owner(event):
+            event.stop_event()
             return
         text = await self.write_post(topic)
         did = str(self.store["next_draft_id"])
@@ -337,6 +341,7 @@ class Dafeiyu(Star):
     @fy.command("发")
     async def cmd_approve(self, event: AstrMessageEvent, draft_id: str):
         if not self._is_owner(event):
+            event.stop_event()
             return
         text = self.store["drafts"].pop(str(draft_id), None)
         if text is None:
@@ -353,6 +358,7 @@ class Dafeiyu(Star):
     @fy.command("弃")
     async def cmd_drop(self, event: AstrMessageEvent, draft_id: str):
         if not self._is_owner(event):
+            event.stop_event()
             return
         ok = self.store["drafts"].pop(str(draft_id), None) is not None
         self.store.save()
@@ -362,6 +368,7 @@ class Dafeiyu(Star):
     async def cmd_delete(self, event: AstrMessageEvent, tid: str = ""):
         """不带参数删最近一条。"""
         if not self._is_owner(event):
+            event.stop_event()
             return
         tid = tid or (self.store["posted"][-1]["tid"] if self.store["posted"] else "")
         if not tid:
