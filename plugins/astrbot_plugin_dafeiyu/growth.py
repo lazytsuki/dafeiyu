@@ -99,6 +99,21 @@ class Growth:
         with open(self.log_dir / f"{day}.jsonl", "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
+    def relabel_log(self, old: str, new: str):
+        """改对话流水里的说话人标签（只改标签，不动内容）。"""
+        for f in self.log_dir.glob("*.jsonl"):
+            out = []
+            for raw in f.read_text("utf-8").splitlines():
+                try:
+                    m = json.loads(raw)
+                except json.JSONDecodeError:
+                    out.append(raw)
+                    continue
+                if m.get("who") == old:
+                    m["who"] = new
+                out.append(json.dumps(m, ensure_ascii=False))
+            f.write_text("\n".join(out) + "\n", "utf-8")
+
     def read_log(self, day: str, start: int = 0, max_chars: int = 12000) -> tuple[str, int]:
         """读某天从第 start 行起的对话，返回 (文本, 总行数)。"""
         p = self.log_dir / f"{day}.jsonl"

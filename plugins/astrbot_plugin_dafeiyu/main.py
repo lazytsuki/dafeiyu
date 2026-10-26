@@ -64,6 +64,23 @@ SPLIT_PROMPT = """下面是你之前写下的「我对自己的认识」，里�
 - "bond"：「我和 TA 之间」——你们的关系、TA 的偏好与要求、你记得的关于 TA 和你们的事、你们之间的梗。
 原文的意思和措辞尽量保留，只是分开放，不要新增内容。"""
 
+REFRAME_PROMPT = """有件事要告诉你：你最早写下的认识里，可能用了「主人」这样的称呼，或者把你和 TA 的关系写成了某种早就定好的样子。那是因为一开始的设定模板写错了，用了「主人」——这不是你选的，也不是 TA 选的。TA 说过，不希望预设任何关系：你们之间是什么、你怎么称呼 TA，都应该从真实的相处里自己长出来。
+
+这是你现在的两份认识：
+
+「我是谁」：
+<<<
+{self_md}
+>>>
+
+「我和 TA 之间」：
+<<<
+{bond_md}
+>>>
+
+请你自己重新看一遍，把由那个旧模板带来的称呼和关系定性去掉（比如「主人」换成「TA」，删掉没有真实依据的关系判断）。真实发生过的事、你自己的感受和观察都保留。没有需要改的就原样返回。
+只输出一个 JSON 对象：{{"self": "...", "bond": "..."}}"""
+
 
 def _hm(s: str) -> dt.time:
     h, m = s.strip().split(":")
@@ -97,7 +114,10 @@ class Dafeiyu(Star):
         return (self.cfg.get("name") or "").strip() or "大肥鱼"
 
     def _core(self) -> str:
-        return (PLUGIN_DIR / "core.md").read_text("utf-8").replace("{name}", self.pet_name)
+        # 数据目录里有自己的 core.md 就用它（只属于你养的这一条，不进公开仓库），否则用通用模板
+        private = data_dir() / "core.md"
+        path = private if private.exists() else PLUGIN_DIR / "core.md"
+        return path.read_text("utf-8").replace("{name}", self.pet_name)
 
     def _self_block(self) -> str:
         return f"\n\n## 我对自己的认识（我自己写的）\n{self.growth.read_self()}"
@@ -319,6 +339,32 @@ class Dafeiyu(Star):
         self.growth.write(out.get("self") or "", out.get("bond") or "")
         logger.info("[大肥鱼] 已把旧的自我认识拆成「我是谁」和「我和 TA 之间」")
 
+    async def _reframe_legacy_relationship(self):
+        """早期模板用了「主人」，预设了关系。告诉它这件事，让它自己重新审视两份认识。只跑一次。"""
+        from .growth import BLANK_SELF
+
+        if self.store["migrations"].get("reframe_relationship"):
+            return
+        # 代码留下的痕迹：直接清掉（这些不是它写的）
+        self.store["recent_proactive"] = []
+        self.growth.relabel_log("主人", "TA")
+        current_self, current_bond = self.growth.read_self(), self.growth.read_bond()
+        if current_self != BLANK_SELF and "主人" in current_self + current_bond:
+            out = _parse_json(
+                await self._llm(
+                    REFRAME_PROMPT.format(self_md=current_self, bond_md=current_bond),
+                    self._core(),
+                    self.cfg.get("reflect_provider_id", ""),
+                )
+            )
+            new_self = (out.get("self") or "").strip() or current_self
+            new_bond = (out.get("bond") or "").strip() or current_bond
+            if (new_self, new_bond) != (current_self, current_bond):
+                self.growth.write(new_self, new_bond)
+            logger.info("[大肥鱼] 已告诉它旧模板预设了关系，它重新审视了自己的认识")
+        self.store["migrations"]["reframe_relationship"] = True
+        self.store.save()
+
     # ---------- 调度 ----------
 
     def _in_quiet(self, now: dt.datetime) -> bool:
@@ -415,6 +461,10 @@ class Dafeiyu(Star):
             await self._split_legacy_self()
         except Exception as e:
             logger.error(f"[大肥鱼] 拆分旧的自我认识失败：{e}", exc_info=True)
+        try:
+            await self._reframe_legacy_relationship()
+        except Exception as e:
+            logger.error(f"[大肥鱼] 重新审视关系框架失败：{e}", exc_info=True)
         while True:
             try:
                 await self._tick()

@@ -21,6 +21,7 @@ DEFAULT = {
     "reflect_offsets": {},    # 每天的对话已经反思到第几行 {day: n}
     "thoughts": [],           # 它心里还没说出口的话，说不说由它自己
     "guest_seen": {},         # 别人（和群）最后一次对话的时间 {umo: ts}
+    "migrations": {},         # 已执行过的一次性迁移 {name: True}
 }
 
 
