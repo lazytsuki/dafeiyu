@@ -10,6 +10,12 @@
     "type": "text",
     "default": ""
   },
+  "sync_persona": {
+    "description": "启动时把人设同步到 AstrBot 默认人格",
+    "type": "bool",
+    "default": true,
+    "hint": "开着则日常聊天也用大肥鱼人设；想在面板「人格设定」里自己管理就关掉"
+  },
   "split_bubbles": {
     "description": "主动消息按换行拆成多条发送",
     "type": "bool",

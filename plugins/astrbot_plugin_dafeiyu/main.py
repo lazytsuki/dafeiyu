@@ -254,8 +254,21 @@ class Dafeiyu(Star):
             self.store.save()
             await self.proactive()
 
+    async def _sync_persona(self):
+        """把人设写进 AstrBot 的默认人格，让日常聊天也用大肥鱼的口吻。"""
+        if not self.cfg.get("sync_persona", True):
+            return
+        try:
+            await self.context.persona_manager.update_persona(
+                "default", system_prompt=self._persona()
+            )
+            logger.info("[大肥鱼] 已把人设同步到 AstrBot 默认人格")
+        except Exception as e:
+            logger.warning(f"[大肥鱼] 同步人设失败：{e}")
+
     async def _loop(self):
         await asyncio.sleep(10)
+        await self._sync_persona()
         while True:
             try:
                 await self._tick()
