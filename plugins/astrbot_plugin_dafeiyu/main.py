@@ -53,7 +53,10 @@ class Dafeiyu(Star):
         return str(event.get_sender_id()) == str(self.cfg.get("owner_qq", "")).strip()
 
     def _onebot(self):
-        platform = self.context.get_platform(filter.PlatformAdapterType.AIOCQHTTP)
+        umo = self.store["owner_umo"]
+        platform = self.context.get_platform_inst(umo.split(":", 1)[0]) if umo else None
+        if platform is None:
+            platform = self.context.get_platform(filter.PlatformAdapterType.AIOCQHTTP)
         if platform is None:
             raise RuntimeError("没有找到 aiocqhttp(NapCat) 平台，检查 AstrBot 消息平台配置")
         return platform.get_client()

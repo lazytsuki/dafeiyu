@@ -1,4 +1,4 @@
-# 把本仓库的大肥鱼插件链接到 AstrBot 的插件目录，改代码后在 AstrBot 面板里「重载插件」即可生效。
+﻿# 把本仓库的大肥鱼插件链接到 AstrBot 的插件目录，改代码后在 AstrBot 面板里「重载插件」即可生效。
 # 用法：.\scripts\link-plugin.ps1 -AstrBotRoot D:\AstrBot
 param(
     [Parameter(Mandatory = $true)][string]$AstrBotRoot

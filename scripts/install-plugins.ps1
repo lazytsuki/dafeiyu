@@ -1,4 +1,4 @@
-# 按 plugins.lock.json 安装社区插件。需要已安装 git。
+﻿# 按 plugins.lock.json 安装社区插件。需要已安装 git。
 # 用法：.\scripts\install-plugins.ps1 -AstrBotRoot D:\AstrBot
 param(
     [Parameter(Mandatory = $true)][string]$AstrBotRoot
