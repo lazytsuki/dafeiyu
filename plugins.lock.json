@@ -1,0 +1,15 @@
+{
+  "_说明": "社区插件清单。scripts/install-plugins.ps1 会把它们 clone 到 AstrBot 的 data/plugins 下；ref 固定版本，升级时改这里。",
+  "plugins": [
+    {
+      "name": "astrbot_plugin_livingmemory",
+      "repo": "https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory",
+      "ref": "main",
+      "why": "长期记忆。需要一个 Embedding 模型：推荐硅基流动免费的 BAAI/bge-m3"
+    }
+  ],
+  "_候选": {
+    "表情包": "在 AstrBot 插件市场搜「表情包」或「meme」，装机时实测后再锁定到这里",
+    "语音": "不需要插件：AstrBot 自带 TTS，在「服务提供商 → 文字转语音」里加 Edge TTS（免费），再开启语音回复"
+  }
+}

@@ -1,0 +1,7 @@
+# 运行数据：含登录态、密钥、聊天记录，绝不能提交
+deploy/napcat/
+deploy/astrbot/
+data/
+*.env
+__pycache__/
+*.pyc

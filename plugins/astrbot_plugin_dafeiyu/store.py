@@ -1,0 +1,53 @@
+"""插件自己的小状态，存成一个 JSON 文件，重启不丢。"""
+
+import json
+import os
+from pathlib import Path
+
+DEFAULT = {
+    "owner_umo": "",          # 主人私聊会话 ID，主人第一次私聊时自动记下
+    "owner_last_msg": 0.0,    # 主人最后一次说话的时间戳
+    "last_proactive": 0.0,    # 上次主动私聊的时间戳
+    "day": "",                # 计数所属日期 YYYY-MM-DD
+    "proactive_count": 0,     # 当天主动私聊次数
+    "fixed_done": [],         # 当天已发过的固定时间点
+    "qzone_done": [],         # 当天已处理过的说说时间点
+    "qzone_slots": {},        # 当天各说说时间点抽到的随机偏移（分钟）
+    "recent_proactive": [],   # 最近主动发出的话 [{"t": ts, "text": ...}]
+    "drafts": {},             # 待审核说说草稿 {id: text}
+    "next_draft_id": 1,
+    "posted": [],             # 已发说说 [{"t": ts, "tid": ..., "text": ...}]
+}
+
+
+def _data_dir() -> Path:
+    try:
+        from astrbot.api.star import StarTools
+
+        return Path(StarTools.get_data_dir("astrbot_plugin_dafeiyu"))
+    except Exception:
+        return Path("data") / "plugin_data" / "astrbot_plugin_dafeiyu"
+
+
+class Store:
+    def __init__(self):
+        d = _data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        self.path = d / "state.json"
+        self.data = dict(DEFAULT)
+        if self.path.exists():
+            try:
+                self.data.update(json.loads(self.path.read_text("utf-8")))
+            except Exception:
+                pass
+
+    def __getitem__(self, k):
+        return self.data[k]
+
+    def __setitem__(self, k, v):
+        self.data[k] = v
+
+    def save(self):
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), "utf-8")
+        os.replace(tmp, self.path)

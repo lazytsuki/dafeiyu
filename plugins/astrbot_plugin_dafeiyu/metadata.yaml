@@ -1,0 +1,6 @@
+name: astrbot_plugin_dafeiyu
+display_name: 大肥鱼
+desc: 用 QQ 小号主动私聊主人、按人设定时发 QQ 空间说说（草稿审核）
+version: 0.1.0
+author: dafeiyu
+repo: ""

@@ -1,0 +1,81 @@
+{
+  "owner_qq": {
+    "description": "主人的 QQ 号（你的大号）",
+    "type": "string",
+    "default": "",
+    "hint": "只有这个号能用 /fy 指令，主动私聊也只发给它。填好后用大号私聊小号说一句话，插件就会记住会话。"
+  },
+  "persona_override": {
+    "description": "人设（留空则使用插件自带的 persona.md）",
+    "type": "text",
+    "default": ""
+  },
+  "split_bubbles": {
+    "description": "主动消息按换行拆成多条发送",
+    "type": "bool",
+    "default": true
+  },
+  "proactive_enabled": {
+    "description": "开启主动私聊",
+    "type": "bool",
+    "default": true
+  },
+  "quiet_hours": {
+    "description": "免打扰时段（不主动私聊、不发说说）",
+    "type": "string",
+    "default": "00:30-08:00",
+    "hint": "格式 HH:MM-HH:MM，可跨午夜；留空表示不设"
+  },
+  "fixed_times": {
+    "description": "固定时间问候",
+    "type": "list",
+    "default": ["08:30 道早安，问问今天的安排", "23:00 催主人早点睡"],
+    "hint": "每行一条：「HH:MM 目的」，不计入每日上限"
+  },
+  "daily_max": {
+    "description": "每天随机主动私聊的上限",
+    "type": "int",
+    "default": 4
+  },
+  "min_interval_minutes": {
+    "description": "两次随机主动私聊之间至少间隔（分钟）",
+    "type": "int",
+    "default": 120
+  },
+  "silence_minutes": {
+    "description": "主人多久没说话后才可能主动找主人（分钟）",
+    "type": "int",
+    "default": 90
+  },
+  "avg_gap_minutes": {
+    "description": "满足条件后，平均多少分钟主动一次（越大越安静）",
+    "type": "int",
+    "default": 240
+  },
+  "qzone_enabled": {
+    "description": "开启定时发说说",
+    "type": "bool",
+    "default": true
+  },
+  "qzone_times": {
+    "description": "每天发说说的时间点",
+    "type": "list",
+    "default": ["12:30", "21:30"]
+  },
+  "qzone_offset_minutes": {
+    "description": "说说时间随机偏移 ±N 分钟（更像真人）",
+    "type": "int",
+    "default": 40
+  },
+  "qzone_review": {
+    "description": "说说先发草稿给主人审核再发布",
+    "type": "bool",
+    "default": true,
+    "hint": "建议先开着，用顺手了再关"
+  },
+  "qzone_topics": {
+    "description": "说说主题池（随机抽一个）",
+    "type": "list",
+    "default": ["今天的心情", "刚吃的东西", "天气", "最近在听的歌", "想主人了", "一个小发现", "睡前碎碎念"]
+  }
+}
