@@ -324,7 +324,7 @@ class Dafeiyu(Star):
             return
         self.store["owner_umo"] = event.unified_msg_origin
         await self.proactive("测试一下主动找主人聊天")
-        event.stop_event()  # 否则这条指令还会被当成普通聊天再回一句
+        # 有意不 stop_event：「戳」本身还会交给模型当普通聊天再回一句，更有活人感
 
     @fy.command("写说说")
     async def cmd_write(self, event: AstrMessageEvent, topic: str = ""):
