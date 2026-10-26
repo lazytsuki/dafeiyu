@@ -1,10 +1,11 @@
-"""成长：对话日志、自我认知（self.md）、日记与快照。
+"""成长：对话流水、它对自己的认识、它和 TA 之间的事、日记与快照。
 
 都存在插件数据目录里（运行时私有，不进仓库）：
-  growth/self.md               它对自己的认识，每晚反思时由它自己改写
-  growth/self_history/*.md     每次改写前的快照，用于回滚
+  growth/self.md               我是谁——性格、说话的样子、喜好；对所有人都是这样的我
+  growth/bond.md               我和 TA 之间——记得的事、TA 的偏好、我们的梗；只在和 TA 私聊时想起
+  growth/self_history/*.json   每次改写前的快照（self + bond），用于回滚
   growth/diary/YYYY-MM-DD.md   日记（它自己的，不提供查看指令）
-  growth/log/YYYY-MM-DD.jsonl  当天和主人的对话流水，反思的原料
+  growth/log/YYYY-MM-DD.jsonl  当天和 TA 的对话流水，反思的原料（别人的对话不记）
 """
 
 import datetime as dt
@@ -13,6 +14,7 @@ import time
 from pathlib import Path
 
 BLANK_SELF = "（还是一张白纸。我刚来到这里，还不太了解自己。）"
+BLANK_BOND = "（我们才刚认识。）"
 
 
 class Growth:
@@ -24,27 +26,46 @@ class Growth:
         for d in (self.history, self.diary_dir, self.log_dir):
             d.mkdir(parents=True, exist_ok=True)
         self.self_path = self.root / "self.md"
+        self.bond_path = self.root / "bond.md"
         if not self.self_path.exists():
             self.self_path.write_text(BLANK_SELF, "utf-8")
 
-    # ---------- 自我认知 ----------
+    # ---------- 我是谁 / 我和 TA ----------
 
     def read_self(self) -> str:
         return self.self_path.read_text("utf-8").strip() or BLANK_SELF
 
-    def write_self(self, text: str):
-        """改写前先存快照。"""
+    def has_bond(self) -> bool:
+        return self.bond_path.exists()
+
+    def read_bond(self) -> str:
+        if not self.bond_path.exists():
+            return BLANK_BOND
+        return self.bond_path.read_text("utf-8").strip() or BLANK_BOND
+
+    def write(self, self_text: str, bond_text: str):
+        """改写前先把两份一起存快照。"""
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        (self.history / f"{stamp}.md").write_text(self.read_self(), "utf-8")
-        self.self_path.write_text(text.strip(), "utf-8")
+        snap = {"self": self.read_self(), "bond": self.read_bond() if self.has_bond() else None}
+        (self.history / f"{stamp}.json").write_text(json.dumps(snap, ensure_ascii=False), "utf-8")
+        self.self_path.write_text(self_text.strip() or BLANK_SELF, "utf-8")
+        self.bond_path.write_text(bond_text.strip() or BLANK_BOND, "utf-8")
 
     def rollback(self) -> str | None:
         """回到上一个快照，返回快照名；没有可回的就返回 None。"""
-        snaps = sorted(self.history.glob("*.md"))
+        snaps = sorted(self.history.glob("*.*"))
         if not snaps:
             return None
         last = snaps[-1]
-        self.self_path.write_text(last.read_text("utf-8"), "utf-8")
+        if last.suffix == ".json":
+            snap = json.loads(last.read_text("utf-8"))
+            self.self_path.write_text(snap["self"], "utf-8")
+            if snap.get("bond") is None:
+                self.bond_path.unlink(missing_ok=True)
+            else:
+                self.bond_path.write_text(snap["bond"], "utf-8")
+        else:  # 旧版只存了 self 的 .md 快照
+            self.self_path.write_text(last.read_text("utf-8"), "utf-8")
         last.unlink()
         return last.stem
 

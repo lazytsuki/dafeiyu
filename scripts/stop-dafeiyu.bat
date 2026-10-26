@@ -7,5 +7,5 @@ if "%BOT_QQ%"=="" (
     echo Please set BOT_QQ in runtime\local.bat
     exit /b 1
 )
-powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -and $_.CommandLine -match 'astrbot\.cli run') -or ($_.Name -eq 'QQ.exe' -and $_.CommandLine -match '-q %BOT_QQ%') -or $_.Name -eq 'NapCatWinBootMain.exe' } | ForEach-Object { taskkill /t /f /pid $_.ProcessId | Out-Null }"
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'python.exe' -and $_.CommandLine -match 'astrbot\.cli run') -or ($_.Name -eq 'QQ.exe' -and $_.CommandLine -match '-q %BOT_QQ%') -or $_.Name -eq 'NapCatWinBootMain.exe' } | ForEach-Object { taskkill /t /f /pid $_.ProcessId 2>$null | Out-Null }"
 echo stopped

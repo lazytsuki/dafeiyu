@@ -1,6 +1,6 @@
 {
   "owner_qq": {
-    "description": "主人的 QQ 号（你的大号）",
+    "description": "你的 QQ 号（给它起名字的人）",
     "type": "string",
     "default": "",
     "hint": "只有这个号能用 /fy 指令，主动私聊也只发给它。填好后用大号私聊小号说一句话，插件就会记住会话。"
@@ -54,7 +54,7 @@
   "fixed_times": {
     "description": "固定时间问候",
     "type": "list",
-    "default": ["08:30 道早安，问问今天的安排", "23:00 催主人早点睡"],
+    "default": ["08:30 早上了", "23:00 夜深了"],
     "hint": "每行一条：「HH:MM 目的」，不计入每日上限"
   },
   "daily_max": {
@@ -68,7 +68,7 @@
     "default": 120
   },
   "silence_minutes": {
-    "description": "主人多久没说话后才可能主动找主人（分钟）",
+    "description": "你多久没说话后它才可能主动找你（分钟）",
     "type": "int",
     "default": 90
   },
@@ -93,7 +93,7 @@
     "default": 40
   },
   "qzone_review": {
-    "description": "说说先发草稿给主人审核再发布",
+    "description": "说说先发草稿给你审核再发布",
     "type": "bool",
     "default": true,
     "hint": "建议先开着，用顺手了再关"
@@ -101,6 +101,6 @@
   "qzone_topics": {
     "description": "说说主题池（随机抽一个）",
     "type": "list",
-    "default": ["今天的心情", "刚吃的东西", "天气", "最近在听的歌", "想主人了", "一个小发现", "睡前碎碎念"]
+    "default": ["今天的心情", "刚吃的东西", "天气", "最近在听的歌", "一个小发现", "睡前碎碎念"]
   }
 }

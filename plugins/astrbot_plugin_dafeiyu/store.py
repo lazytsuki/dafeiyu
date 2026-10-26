@@ -5,8 +5,8 @@ import os
 from pathlib import Path
 
 DEFAULT = {
-    "owner_umo": "",          # 主人私聊会话 ID，主人第一次私聊时自动记下
-    "owner_last_msg": 0.0,    # 主人最后一次说话的时间戳
+    "owner_umo": "",          # 给它起名字的人（owner）的私聊会话 ID，第一次私聊时自动记下
+    "owner_last_msg": 0.0,    # owner 最后一次说话的时间戳
     "last_proactive": 0.0,    # 上次主动私聊的时间戳
     "day": "",                # 计数所属日期 YYYY-MM-DD
     "proactive_count": 0,     # 当天主动私聊次数
