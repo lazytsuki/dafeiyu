@@ -90,6 +90,16 @@
 
 资源参考（实测）：AstrBot 约 270 MB 内存，NapCat 挂的 QQ 约 470 MB，空闲时 CPU 接近 0；磁盘约 1 GB（AstrBot 环境 500 MB + 运行数据 + 小号 QQ 数据）。
 
+## 备份到私库
+
+你养的那一条（成长数据、日记、名字、配置）不进这个公开仓库，单独备份到你自己的**私有**仓库：
+
+1. 在 GitHub 建一个私有仓库，地址写进 `runtime\local.bat`：`set "BACKUP_REMOTE=https://github.com/<你>/<私库>.git"`
+2. `scripts\backup.bat`（或 `python scripts/backup.py`）把插件数据、插件配置、AstrBot 主配置、`local.bat` 同步到 `runtime\backup` 并推送；没有变化就不提交。API Key / 密码 / token 一律打码，QQ 登录态和聊天数据库不备份。
+3. 任务计划程序里建一个每天 04:00（在 03:30 反思之后）、勾选「错过后尽快运行」的任务，执行 `wscript.exe "C:\dafeiyu\scripts\run-hidden.vbs" backup.bat`。日志在 `runtime\backup.log`。
+
+恢复：停掉服务，按私库 README 把各目录复制回 `runtime\`，打码的密钥重新填上，再启动。
+
 ## 防封建议
 
 - 主动私聊默认每天随机最多 4 次，外加两条固定问候；说说默认每天 2 条且需要你审核，时间随机偏移。别调得太频繁。
