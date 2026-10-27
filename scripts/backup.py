@@ -31,6 +31,7 @@ README = """# 私有备份
 | `config/` | 各插件配置（密钥已打码） | `runtime/astrbot/data/config/`（打码处需重新填写） |
 | `astrbot/cmd_config.redacted.json` | AstrBot 主配置（密钥已打码，仅供对照） | 按需手动合并 |
 | `machine/local.bat` | 本机参数 | `runtime/local.bat` |
+| `ext/` | 你自己的私有扩展（比如只给你这一条用的插件）；备份不会改动它 | 按扩展自己的说明 |
 
 恢复前先停掉服务（scripts/stop-dafeiyu.bat），复制回去后再启动。
 """
@@ -84,9 +85,9 @@ def ensure_repo(remote: str):
 
 
 def sync():
-    # 镜像式同步：先清掉旧副本（保留 .git），再整份复制，删掉的文件也会同步删除
+    # 镜像式同步：先清掉旧副本（保留 .git 和你自己放的 ext/），再整份复制，删掉的文件也会同步删除
     for p in DEST.iterdir():
-        if p.name != ".git":
+        if p.name not in (".git", "ext"):
             shutil.rmtree(p) if p.is_dir() else p.unlink()
     (DEST / "README.md").write_text(README, "utf-8")
     if (DATA / "plugin_data").exists():
