@@ -90,6 +90,10 @@
 3. 在任务计划程序里建一个「登录时」触发、延迟 30 秒、不限运行时长的任务，执行 `wscript.exe "C:\dafeiyu\scripts\start-dafeiyu.vbs"`。
 4. 后台运行时看日志：AstrBot 配置里开 `log_file_enable`（`runtime\astrbot\data\logs\astrbot.log`）；NapCat 配置 `napcat_<小号>.json` 里开 `fileLog`（`runtime\napcat-shell\logs\`）。
 
+**重启后要扫码？** NapCat 的免扫码凭证隔得久了（比如关机过夜）可能失效。可以自己双击 `scripts\set-qq-password.bat`，输入小号密码（不显示，只保存 MD5 到 `runtime\secrets.bat`，不进 git、不进备份）：免扫码失败时 NapCat 会先用它回退登录，二维码作为最后兜底。第一次密码登录可能要在 NapCat 面板（http://127.0.0.1:6099）完成验证码或新设备验证；密码登录也比扫码更容易触发风控，不想用就删掉 `secrets.bat`。
+
+QQ 没连上时，插件不做任何要通过 QQ 的事（主动私聊、发说说），到点的时间点会保留到连上为止；没送到的说说草稿会在连上后补发。
+
 资源参考（实测）：AstrBot 约 270 MB 内存，NapCat 挂的 QQ 约 470 MB，空闲时 CPU 接近 0；磁盘约 1 GB（AstrBot 环境 500 MB + 运行数据 + 小号 QQ 数据）。
 
 ## 备份到私库

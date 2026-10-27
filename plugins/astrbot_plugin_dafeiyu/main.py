@@ -270,16 +270,34 @@ class Dafeiyu(Star):
             did = str(self.store["next_draft_id"])
             self.store["next_draft_id"] += 1
             self.store["drafts"][did] = text
+            self.store["drafts_unsent"].append(did)
             self.store.save()
-            await self.context.send_message(
-                self.store["owner_umo"],
-                MessageChain().message(
-                    f"我想发条说说～（草稿 {did}）\n{text}\n\n"
-                    f"同意回复 /fy 发 {did}，不要就 /fy 弃 {did}"
-                ),
-            )
+            await self._send_pending_drafts()
         else:
             await self.publish_post(text)
+
+    async def _send_pending_drafts(self):
+        """把还没送到 TA 手里的草稿发出去；发不出去就留着，下次在线时再发。"""
+        for did in list(self.store["drafts_unsent"]):
+            text = self.store["drafts"].get(did)
+            if text is not None:
+                await self.context.send_message(
+                    self.store["owner_umo"],
+                    MessageChain().message(
+                        f"我想发条说说～（草稿 {did}）\n{text}\n\n"
+                        f"同意回复 /fy 发 {did}，不要就 /fy 弃 {did}"
+                    ),
+                )
+            self.store["drafts_unsent"].remove(did)
+            self.store.save()
+
+    async def _online(self) -> bool:
+        """QQ（NapCat）现在连着吗。没连上时，到点的事都先别做，等连上再说。"""
+        try:
+            await asyncio.wait_for(self._onebot().api.call_action("get_login_info"), 10)
+            return True
+        except Exception:
+            return False
 
     # ---------- 反思：把一天的经历沉淀成自己 ----------
 
@@ -406,6 +424,12 @@ class Dafeiyu(Star):
             self.store["reflected_day"] = yesterday
             self.store.save()
             await self.reflect(yesterday)
+
+        # 下面的事都要通过 QQ：没连上就整轮跳过，时间点不消耗，等连上了再做
+        if not await self._online():
+            return
+        if self.store["drafts_unsent"] and self.store["owner_umo"]:
+            await self._send_pending_drafts()
 
         if self.cfg.get("qzone_enabled", True):
             for t, off in self.store["qzone_slots"].items():

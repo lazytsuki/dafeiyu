@@ -11,6 +11,8 @@ set "NAPCAT_LOAD_PATH=%cd%\loadNapCat.js"
 set "NAPCAT_INJECT_PATH=%cd%\NapCatWinBootHook.dll"
 set "NAPCAT_LAUNCHER_PATH=%cd%\NapCatWinBootMain.exe"
 set "NAPCAT_MAIN_PATH=%cd%\napcat.mjs"
+REM Optional password fallback when quick login fails (see set-qq-password.bat); never committed or backed up
+if exist "%~dp0..\runtime\secrets.bat" call "%~dp0..\runtime\secrets.bat"
 if not exist "%QQPath%" (
     echo 找不到 QQ：%QQPath%
     exit /b 1
