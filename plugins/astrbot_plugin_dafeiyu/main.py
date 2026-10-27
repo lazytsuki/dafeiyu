@@ -18,6 +18,7 @@ from .store import Store, data_dir
 PLUGIN_DIR = Path(__file__).parent
 TICK_SECONDS = 60
 FIXED_WINDOW_MINUTES = 30  # 固定问候错过多久之内还补发
+CATCHUP_DAYS = 7  # 关机几天后，最多往回补反思这么多天
 
 REFLECT_PROMPT = """现在是深夜，你一个人安静下来，回想今天。
 
@@ -86,6 +87,17 @@ REFRAME_PROMPT = """有件事要告诉你：你最早写下的认识里，可能
 def _hm(s: str) -> dt.time:
     h, m = s.strip().split(":")
     return dt.time(int(h), int(m))
+
+
+def _missed_days(last: str, yesterday: str, limit: int = CATCHUP_DAYS) -> list[str]:
+    """上次处理到 last，现在该处理到 yesterday：返回中间漏掉的每一天（从早到晚，最多 limit 天）。"""
+    end = dt.date.fromisoformat(yesterday)
+    try:
+        start = dt.date.fromisoformat(last) + dt.timedelta(days=1)
+    except ValueError:  # 还没处理过任何一天
+        start = end
+    start = max(start, end - dt.timedelta(days=limit - 1))
+    return [(start + dt.timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
 
 
 def _parse_json(text: str) -> dict:
@@ -431,13 +443,14 @@ class Dafeiyu(Star):
         self._new_day(now)
         ts = time.time()
 
-        # 每晚反思前一天
+        # 每晚反思前一天；关机错过了几天，就按顺序一天天补（没对话的那天自然跳过）
         yesterday = (now - dt.timedelta(days=1)).strftime("%Y-%m-%d")
         reflect_at = self.cfg.get("reflect_time", "03:30")
         if reflect_at and now.time() >= _hm(reflect_at) and self.store["reflected_day"] != yesterday:
-            self.store["reflected_day"] = yesterday
-            self.store.save()
-            await self.reflect(yesterday)
+            for day in _missed_days(self.store["reflected_day"], yesterday):
+                self.store["reflected_day"] = day
+                self.store.save()
+                await self.reflect(day)
 
         # 下面的事都要通过 QQ：没连上就整轮跳过，时间点不消耗，等连上了再做
         if not await self._online():
