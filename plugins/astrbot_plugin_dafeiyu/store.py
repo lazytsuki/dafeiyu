@@ -22,7 +22,10 @@ DEFAULT = {
     "thoughts": [],           # 它心里还没说出口的话，说不说由它自己
     "guest_seen": {},         # 别人（和群）最后一次对话的时间 {umo: ts}
     "migrations": {},         # 已执行过的一次性迁移 {name: True}
-    "drafts_unsent": [],      # 已写好、但还没成功发给 TA 审核的草稿编号
+    "drafts_unsent": [],      # 已写好、但还没成功发给 TA 审核的草稿编号（仅开启审核时）
+    "qzone_count": 0,         # 当天它自己发了几条说说（防封护栏用）
+    "signature": "",          # 它最近一次给自己设的个性签名
+    "pending_signature": "",  # 反思时决定要换、还没生效的签名
 }
 
 

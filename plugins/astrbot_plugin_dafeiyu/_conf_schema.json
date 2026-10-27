@@ -64,10 +64,13 @@
     "hint": "格式 HH:MM-HH:MM，可跨午夜；留空表示不设"
   },
   "fixed_times": {
-    "description": "固定时间问候",
+    "description": "固定的「要不要找 TA 说句话」时刻",
     "type": "list",
-    "default": ["08:30 早上了", "23:00 夜深了"],
-    "hint": "每行一条：「HH:MM 目的」，不计入每日上限"
+    "default": [
+      "08:30 早上了",
+      "23:00 夜深了"
+    ],
+    "hint": "每行一条：「HH:MM 由头」。到点时它可以说，也可以不说；不计入每日上限"
   },
   "daily_max": {
     "description": "每天随机主动私聊的上限",
@@ -90,14 +93,25 @@
     "default": 240
   },
   "qzone_enabled": {
-    "description": "开启定时发说说",
+    "description": "允许它发说说",
     "type": "bool",
     "default": true
   },
   "qzone_times": {
-    "description": "每天发说说的时间点",
+    "description": "每天「想不想发条说说」的时刻",
     "type": "list",
-    "default": ["12:30", "21:30"]
+    "default": [
+      "11:30",
+      "17:00",
+      "21:30"
+    ],
+    "hint": "到点时由它决定发不发、写什么；时间会随机偏移"
+  },
+  "qzone_daily_max": {
+    "description": "每天最多发几条说说",
+    "type": "int",
+    "default": 2,
+    "hint": "防封护栏：发得太频繁容易被风控，不是对它的约束"
   },
   "qzone_offset_minutes": {
     "description": "说说时间随机偏移 ±N 分钟（更像真人）",
@@ -105,14 +119,9 @@
     "default": 40
   },
   "qzone_review": {
-    "description": "说说先发草稿给你审核再发布",
+    "description": "说说先发给你审核再发布",
     "type": "bool",
-    "default": true,
-    "hint": "建议先开着，用顺手了再关"
-  },
-  "qzone_topics": {
-    "description": "说说主题池（随机抽一个）",
-    "type": "list",
-    "default": ["今天的心情", "刚吃的东西", "天气", "最近在听的歌", "一个小发现", "睡前碎碎念"]
+    "default": false,
+    "hint": "默认关：发什么是它的自由。打开后草稿会先私聊给你"
   }
 }

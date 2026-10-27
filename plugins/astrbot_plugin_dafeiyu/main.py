@@ -51,7 +51,8 @@ REFLECT_PROMPT = """现在是深夜，你一个人安静下来，回想今天。
   · 两份加起来这次最多改 3 处；今天没什么新发现就原样返回。
   · 写成自己的了解，不要写成设定说明书。
 - "changes"：这次改了什么，每条一句话（数组，没改就空数组）。
-- "thoughts"：心里想对 TA 说、但还没说的话（数组，可以为空）。说不说、什么时候说、怎么说，以后都由你自己决定。"""
+- "thoughts"：心里想对 TA 说、但还没说的话（数组，可以为空）。说不说、什么时候说、怎么说，以后都由你自己决定。
+- "signature"：你的 QQ 个性签名（别人都能看到）。现在是：「{signature}」。想换就写新的，不想换就填 null。"""
 
 SPLIT_PROMPT = """下面是你之前写下的「我对自己的认识」，里面混着两类内容：
 
@@ -229,26 +230,29 @@ class Dafeiyu(Star):
             f"你想主动给 TA 发条 QQ 私聊，由头：{kind}。"
             "像真人发消息一样口语、简短，可以接着之前的话题，也可以说说你此刻在想的事；"
             "多句时用换行分开；不要解释、不要加引号，直接输出要发的内容。"
+            "如果此刻其实不想说话，就只输出 SKIP。"
         )
         text = self._clean(await self._llm(prompt, self._system() + self._thoughts_block()))
-        if text:
+        if text and text.upper() != "SKIP":
             await self._send_owner(text)
-        return text
+            return text
+        return ""
 
     # ---------- 说说 ----------
 
-    async def write_post(self, topic: str = "") -> str:
-        topics = self.cfg.get("qzone_topics") or []
-        topic = topic or (random.choice(topics) if topics else "今天的心情")
+    async def write_post(self, topic: str = "", optional: bool = False) -> str:
+        """写一条说说。optional=True 时它可以决定不发（返回空串）。"""
         posted = "\n".join(p["text"][:60] for p in self.store["posted"][-5:])
         prompt = (
-            f"现在是 {dt.datetime.now():%Y-%m-%d %H:%M}。以你自己的身份写一条 QQ 空间说说，"
-            f"主题参考：{topic}（也可以写你自己此刻更想写的）。\n要求：50 字以内，生活化、有画面感，"
-            "不要带话题标签，不要提到自己是 AI，直接输出说说正文。\n"
-            f"最近发过的说说（别重复）：\n{posted or '（无）'}"
+            f"现在是 {dt.datetime.now():%Y-%m-%d %H:%M}。"
+            + (f"写一条 QQ 空间说说，关于：{topic}。\n" if topic else "你可以在 QQ 空间发条说说——写什么、怎么写都由你。\n")
+            + "这是你自己的空间，别人都能看到。不要带话题标签，直接输出说说正文。\n"
+            + (f"最近发过的说说：\n{posted}\n" if posted else "")
+            + ("如果此刻并不想发，就只输出 SKIP。" if optional else "")
         )
         # 说说是公开的：只用对外的自己，不带「我和 TA 之间」；心事要不要写进去由它决定
-        return self._clean(await self._llm(prompt, self._public_system() + self._thoughts_block()))
+        text = self._clean(await self._llm(prompt, self._public_system() + self._thoughts_block()))
+        return "" if text.upper() == "SKIP" else text
 
     async def publish_post(self, text: str) -> str:
         tid = await (await self._qzone()).publish(text)
@@ -260,10 +264,15 @@ class Dafeiyu(Star):
         return tid
 
     async def scheduled_post(self):
-        text = await self.write_post()
+        """一个「想不想发条说说」的时刻：发不发、发什么都由它决定。"""
+        if self.store["qzone_count"] >= int(self.cfg.get("qzone_daily_max", 2)):
+            return  # 防封护栏，不是性格约束
+        text = await self.write_post(optional=True)
         if not text:
             return
-        if self.cfg.get("qzone_review", True):
+        self.store["qzone_count"] += 1
+        self.store.save()
+        if self.cfg.get("qzone_review", False):
             if not self.store["owner_umo"]:
                 logger.warning("[大肥鱼] 说说需要审核，但还没记住 owner 的私聊会话，本次跳过")
                 return
@@ -322,6 +331,7 @@ class Dafeiyu(Star):
             wishes=wishes_block,
             day=day,
             log=log,
+            signature=self.store["signature"] or "（还没设过）",
         )
         raw = await self._llm(prompt, self._core(), self.cfg.get("reflect_provider_id", ""))
         out = _parse_json(raw)
@@ -332,6 +342,9 @@ class Dafeiyu(Star):
         if new_self != self.growth.read_self() or new_bond != self.growth.read_bond():
             self.growth.write(new_self, new_bond)
         self.store["thoughts"] = [str(t) for t in (out.get("thoughts") or [])][:5]
+        sig = out.get("signature")
+        if isinstance(sig, str) and sig.strip() and sig.strip() != self.store["signature"]:
+            self.store["pending_signature"] = sig.strip()[:60]  # 等 QQ 在线时再换
         self.store["reflect_offsets"][day] = total
         self.store["reflect_offsets"] = dict(sorted(self.store["reflect_offsets"].items())[-7:])
         self.store.save()
@@ -400,6 +413,7 @@ class Dafeiyu(Star):
         off = int(self.cfg.get("qzone_offset_minutes", 40))
         self.store["day"] = today
         self.store["proactive_count"] = 0
+        self.store["qzone_count"] = 0
         self.store["fixed_done"] = []
         self.store["qzone_slots"] = {
             t: random.randint(-off, off) for t in self.cfg.get("qzone_times") or []
@@ -430,6 +444,13 @@ class Dafeiyu(Star):
             return
         if self.store["drafts_unsent"] and self.store["owner_umo"]:
             await self._send_pending_drafts()
+        if self.store["pending_signature"]:
+            sig = self.store["pending_signature"]
+            await self._onebot().api.call_action("set_self_longnick", longNick=sig)
+            self.store["signature"], self.store["pending_signature"] = sig, ""
+            self.store.save()
+            self.growth.log("我（换了签名）", sig)
+            logger.info("[大肥鱼] 它换了个性签名")
 
         if self.cfg.get("qzone_enabled", True):
             for t, off in self.store["qzone_slots"].items():
@@ -570,6 +591,7 @@ class Dafeiyu(Star):
             f"你的私聊会话：{s['owner_umo'] or '未记录（先私聊我一句）'}\n"
             f"今天主动私聊：{s['proactive_count']}/{self.cfg.get('daily_max', 4)}\n"
             f"今天说说时间点（含偏移分钟）：{s['qzone_slots']}，已处理 {s['qzone_done']}\n"
+            f"今天它发了 {s['qzone_count']}/{self.cfg.get('qzone_daily_max', 2)} 条说说\n"
             f"待审核草稿：{', '.join(s['drafts']) or '无'}\n"
             f"免打扰：{self.cfg.get('quiet_hours') or '无'}，现在{'是' if self._in_quiet(dt.datetime.now()) else '不是'}免打扰时段\n"
             f"上次反思：{s['reflected_day'] or '还没有'}"
