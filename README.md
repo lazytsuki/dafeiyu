@@ -31,6 +31,16 @@
 
 你想对它说的话可以写进插件配置「你想对它说的话」——它会在反思时读到，但那是期望，不是命令。
 
+## 长期记忆与语音（硅基流动，一个 Key 两用）
+
+1. `scripts\install-plugins.ps1 -AstrBotRoot runtime\astrbot` 装上 LivingMemory。
+2. 面板「服务提供商」加两项（api_base 都是 `https://api.siliconflow.cn/v1`，Key 填同一个）：
+   - Embedding：`OpenAI Embedding`，ID `siliconflow_embedding`，模型 `BAAI/bge-m3`，维度 1024；
+   - 语音转文字：`Whisper(API)`，ID `siliconflow_stt`，模型 `FunAudioLLM/SenseVoiceSmall`，然后在「语音转文字」设置里启用它。
+3. LivingMemory 配置：Embedding 填 `siliconflow_embedding`；**记忆白名单打开，只填 TA 的私聊会话**（如 `napcat:FriendMessage:你的QQ号`）——别人的对话不会变成记忆，和「只有 TA 能塑造它」一致；作用域选 `session`；可以打开主动记忆写入工具，想记住什么由它决定。
+
+LivingMemory 记的是事实（「TA 下周面试」），`self.md` / `bond.md` 是它对自己、对你们关系的认识，`recall_past` 翻的是原话——三者各管一层。
+
 ## 给它的脚手架
 
 下面这些只是让它「能做到」，不告诉它该是什么样、该怎么用：
@@ -140,9 +150,9 @@ QQ 没连上时，插件不做任何要通过 QQ 的事（主动私聊、发说�
 - [x] 第一步：极简内核 + 每晚反思（日记、自我认识、心事）
 - [x] 说到做到、上线补回、发得出去才算在线
 - [x] 翻原话（对话流水 + 日记）、自己记的心情、空间评论互动、花销预算、看得见表情
-- [ ] 第二步：接长期记忆（LivingMemory 管事实，自我认识管「我是谁」；需要一个 Embedding 模型的 Key）
+- [x] 第二步：接长期记忆（LivingMemory 管事实，自我认识管「我是谁」）
+- [x] 听得懂语音（硅基流动 SenseVoiceSmall；开了语音转文字，插件就不再提示「听不了」）
 - [ ] 第三步：成长反过来影响行为（作息、主动的时机、想发的说说）
-- [ ] 听得懂语音（AstrBot「语音转文字」接一个服务商即可，插件会自动不再提示「听不了」）
 - [ ] 主动私聊偶尔发语音、表情包；说说配图
 - [ ] 掉线需要扫码时把二维码推到手机
 - [ ] 迁移到云服务器
