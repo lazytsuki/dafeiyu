@@ -123,5 +123,39 @@
     "type": "bool",
     "default": false,
     "hint": "默认关：发什么是它的自由。打开后草稿会先私聊给你"
+  },
+  "qzone_interact": {
+    "description": "去空间时也看看评论和你的说说",
+    "type": "bool",
+    "default": true,
+    "hint": "到了「想不想发条说说」的时刻，它会先看看自己说说下的新评论、你最近几天的说说，再决定回不回、评不评、发不发"
+  },
+  "qzone_comment_daily_max": {
+    "description": "每天最多在空间评论几条",
+    "type": "int",
+    "default": 3,
+    "hint": "防封护栏，不是对它的约束"
+  },
+  "daily_budget": {
+    "description": "每天的花销预算（元），0 表示不限",
+    "type": "float",
+    "default": 0,
+    "hint": "超了以后当天它自发的事（看空间、主动私聊、逛 B 站微博）先停；回你和别人的消息、补做答应过的事不受影响。只是估算"
+  },
+  "price_input": {
+    "description": "模型价格：输入（元 / 百万 token）",
+    "type": "float",
+    "default": 2,
+    "hint": "按你用的模型的官方价格填，只用来估算花销"
+  },
+  "price_cached": {
+    "description": "模型价格：缓存命中的输入（元 / 百万 token）",
+    "type": "float",
+    "default": 0.2
+  },
+  "price_output": {
+    "description": "模型价格：输出（元 / 百万 token）",
+    "type": "float",
+    "default": 8
   }
 }

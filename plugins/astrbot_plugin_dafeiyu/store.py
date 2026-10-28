@@ -26,6 +26,16 @@ DEFAULT = {
     "qzone_count": 0,         # 当天它自己发了几条说说（防封护栏用）
     "signature": "",          # 它最近一次给自己设的个性签名
     "pending_signature": "",  # 反思时决定要换、还没生效的签名
+    "last_online": 0.0,       # 最近一次确认 QQ 在线的时间
+    "missed_since": 0.0,      # 上一段不在线从什么时候开始（等补回 TA 的消息，补完清零）
+    "missed_after": 0.0,      # 重新连上后等到这个时间再补回（先让 NapCat 推过来的离线消息走完）
+    "jobs_handled": [],       # 已经补做过的、当时错过的未来任务 ID
+    "send_error": "",         # 最近一次主动发消息失败的时间和原因
+    "qzone_seen": [],         # 空间里已经看过的评论 / TA 的说说
+    "qzone_comment_count": 0, # 当天在空间评论了几条（防封护栏用）
+    "moods": [],              # 它自己记下的心情 [{"t": ts, "text": ..., "with_ta": bool}]
+    "usage": {},              # 插件自己当天用掉的 token {"day", "in", "cached", "out"}
+    "budget_paused": "",      # 哪天超了预算（别的扩展也看这个，自发的事那天先停）
 }
 
 

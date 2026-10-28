@@ -3,6 +3,7 @@ import datetime as dt
 import json
 import random
 import re
+import sqlite3
 import time
 from pathlib import Path
 
@@ -11,14 +12,20 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
 
+from .catchup import fmt_gap, job_run_at, overdue_jobs, unanswered
 from .growth import Growth
 from .qzone import QzoneClient, QzoneError
+from .recall import search as recall_search
+from .senses import describe_message, plain_text
 from .store import Store, data_dir
 
 PLUGIN_DIR = Path(__file__).parent
 TICK_SECONDS = 60
 FIXED_WINDOW_MINUTES = 30  # 固定问候错过多久之内还补发
 CATCHUP_DAYS = 7  # 关机几天后，最多往回补反思这么多天
+OFFLINE_GAP = 600  # 连续这么久（秒）不在线，回来时就翻一翻错过了什么
+SETTLE_SECONDS = 120  # 刚连上先等一会儿：NapCat 可能把离线消息直接推过来，那些 AstrBot 自己会回
+MOOD_HOURS = 12  # 记下的心情过了这么久就不再想起
 
 REFLECT_PROMPT = """现在是深夜，你一个人安静下来，回想今天。
 
@@ -41,7 +48,7 @@ REFLECT_PROMPT = """现在是深夜，你一个人安静下来，回想今天。
 <<<
 {log}
 >>>
-
+{moods}
 请像睡前回想这一天那样，只输出一个 JSON 对象，包含：
 - "diary"：以第一人称写今天的日记，100-300 字。这是你自己的，写你真实注意到的、在意的、想不明白的。
 - "self"：改写后完整的「我是谁」（Markdown）：你的性格、说话的样子、喜欢和在意的东西。别人来找你聊天时也会看到这样的你，所以这里不写 TA 的私事。
@@ -83,6 +90,16 @@ REFRAME_PROMPT = """有件事要告诉你：你最早写下的认识里，可能
 请你自己重新看一遍，把由那个旧模板带来的称呼和关系定性去掉（比如「主人」换成「TA」，删掉没有真实依据的关系判断）。真实发生过的事、你自己的感受和观察都保留。没有需要改的就原样返回。
 只输出一个 JSON 对象：{{"self": "...", "bond": "..."}}"""
 
+QZONE_PROMPT = """现在是 {now}。你打开 QQ 空间看了看：
+
+{items}
+{posted}
+空间里的说说和评论，能看到的人都看得到，所以不写只属于你和 TA 之间的私事。
+你可以：
+- "comments"：回复或评论上面的某几条（用编号），写你想说的话。不想回就留空，不回也很正常。
+- "post"：想发一条新说说就写正文（不要话题标签），不想发就填 null。{post_hint}
+只输出一个 JSON 对象：{{"comments": [{{"n": 1, "text": "..."}}], "post": null}}"""
+
 
 def _hm(s: str) -> dt.time:
     h, m = s.strip().split(":")
@@ -107,7 +124,7 @@ def _parse_json(text: str) -> dict:
     return json.loads(m.group(0))
 
 
-@register("astrbot_plugin_dafeiyu", "dafeiyu", "大肥鱼：会主动找你、会发说说、会自己长大的 QQ 伙伴", "0.3.0")
+@register("astrbot_plugin_dafeiyu", "dafeiyu", "大肥鱼：会主动找你、会发说说、会自己长大的 QQ 伙伴", "0.4.0")
 class Dafeiyu(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -145,6 +162,14 @@ class Dafeiyu(Star):
         lines = "\n".join(f"- {t}" for t in thoughts)
         return f"\n\n（你心里有些还没对 TA 说的话。说不说、什么时候说、怎么说，都由你决定：\n{lines}）"
 
+    def _mood_block(self) -> str:
+        """它自己记下的最近一次心情。只是提一句多久以前，不替它判断现在还是不是这样。"""
+        moods = [m for m in self.store["moods"] if time.time() - m["t"] < MOOD_HOURS * 3600]
+        if not moods:
+            return ""
+        m = moods[-1]
+        return f"\n\n（你 {fmt_gap(time.time() - m['t'])}前记下的心情：{m['text']}）"
+
     def _system(self) -> str:
         """和 TA 私聊时的完整自己。"""
         return self._core() + self._self_block() + self._bond_block()
@@ -159,6 +184,11 @@ class Dafeiyu(Star):
 
     def _is_owner(self, event: AstrMessageEvent) -> bool:
         return str(event.get_sender_id()) == str(self.cfg.get("owner_qq", "")).strip()
+
+    @staticmethod
+    def _is_cron(event: AstrMessageEvent) -> bool:
+        """是它自己定的「未来任务」到点把自己叫醒，不是谁发来的消息（发送者 ID 会被设成会话 ID）。"""
+        return event.get_extra("cron_job") is not None
 
     def _onebot(self):
         umo = self.store["owner_umo"]
@@ -191,7 +221,64 @@ class Dafeiyu(Star):
         resp = await provider.text_chat(
             prompt=prompt, system_prompt=system or self._system(), contexts=[]
         )
+        self._count_usage(resp)
         return resp.completion_text or ""
+
+    # ---------- 花销：超了预算，它自发的事先停一停；和人聊天不受影响 ----------
+
+    def _count_usage(self, resp):
+        """插件自己的模型调用（反思、主动私聊、空间）不进 AstrBot 的统计，自己记。"""
+        u = getattr(resp, "usage", None)
+        if not u:
+            return
+        today = dt.date.today().isoformat()
+        if self.store["usage"].get("day") != today:
+            self.store["usage"] = {"day": today, "in": 0, "cached": 0, "out": 0}
+        self.store["usage"]["in"] += int(getattr(u, "input_other", 0) or 0)
+        self.store["usage"]["cached"] += int(getattr(u, "input_cached", 0) or 0)
+        self.store["usage"]["out"] += int(getattr(u, "output", 0) or 0)
+        self.store.save()
+
+    def _chat_usage_today(self) -> tuple[int, int, int]:
+        """AstrBot 记下的今天聊天（含未来任务）用掉的 token：(输入, 缓存命中, 输出)。"""
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+            db = Path(get_astrbot_data_path()) / "data_v4.db"
+            midnight = dt.datetime.combine(dt.date.today(), dt.time()).timestamp()
+            with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5) as c:
+                row = c.execute(
+                    "select sum(token_input_other), sum(token_input_cached), sum(token_output)"
+                    " from provider_stats where start_time >= ?",
+                    (midnight,),
+                ).fetchone()
+            return tuple(int(x or 0) for x in row)
+        except Exception as e:
+            logger.debug(f"[大肥鱼] 读取用量统计失败：{e}")
+            return 0, 0, 0
+
+    def spent_today(self) -> float:
+        """今天大概花了多少钱（元）。价格在配置里填，按百万 token 计。"""
+        a, b, c = self._chat_usage_today()
+        u = self.store["usage"] if self.store["usage"].get("day") == dt.date.today().isoformat() else {}
+        a, b, c = a + u.get("in", 0), b + u.get("cached", 0), c + u.get("out", 0)
+        price = lambda k, d: float(self.cfg.get(k, d) or 0)
+        return (
+            a * price("price_input", 2) + b * price("price_cached", 0.2) + c * price("price_output", 8)
+        ) / 1e6
+
+    def _over_budget(self) -> bool:
+        budget = float(self.cfg.get("daily_budget", 0) or 0)
+        if budget <= 0:
+            return False
+        over = self.spent_today() >= budget
+        today = dt.date.today().isoformat()
+        if over and self.store["budget_paused"] != today:
+            # 写进状态：别的扩展（比如逛 B 站）也会看这个标记
+            self.store["budget_paused"] = today
+            self.store.save()
+            logger.info(f"[大肥鱼] 今天的花销到了预算 {budget} 元，它自发的事先停到明天")
+        return over
 
     async def _recent_history(self, n: int = 8) -> str:
         umo = self.store["owner_umo"]
@@ -223,7 +310,13 @@ class Dafeiyu(Star):
         for i, p in enumerate(parts[:4]):
             if i:
                 await asyncio.sleep(random.uniform(1.5, 4))
-            await self.context.send_message(umo, MessageChain().message(p))
+            try:
+                await self.context.send_message(umo, MessageChain().message(p))
+            except Exception as e:
+                # 「连着」不等于「发得出去」：记下来，状态里能看到
+                self.store["send_error"] = f"{dt.datetime.now():%m-%d %H:%M} {e}"[:200]
+                self.store.save()
+                raise
         self.store["recent_proactive"] = (
             self.store["recent_proactive"] + [{"t": time.time(), "text": text}]
         )[-5:]
@@ -244,7 +337,9 @@ class Dafeiyu(Star):
             "多句时用换行分开；不要解释、不要加引号，直接输出要发的内容。"
             "如果此刻其实不想说话，就只输出 SKIP。"
         )
-        text = self._clean(await self._llm(prompt, self._system() + self._thoughts_block()))
+        text = self._clean(
+            await self._llm(prompt, self._system() + self._thoughts_block() + self._mood_block())
+        )
         if text and text.upper() != "SKIP":
             await self._send_owner(text)
             return text
@@ -275,11 +370,106 @@ class Dafeiyu(Star):
         self.growth.log("我（发了说说）", text)
         return tid
 
-    async def scheduled_post(self):
-        """一个「想不想发条说说」的时刻：发不发、发什么都由它决定。"""
-        if self.store["qzone_count"] >= int(self.cfg.get("qzone_daily_max", 2)):
-            return  # 防封护栏，不是性格约束
-        text = await self.write_post(optional=True)
+    async def _qzone_look(self, qz: QzoneClient) -> list[dict]:
+        """打开空间能看到的新东西：自己说说下别人的新评论、TA 最近几天的说说。"""
+        bot = await self._get_bot_uin()
+        owner = str(self.cfg.get("owner_qq", "")).strip()
+        seen = set(self.store["qzone_seen"])
+        now = time.time()
+        items = []
+        for p in await qz.list_posts(bot, 5):
+            for c in p["comments"]:
+                key = f"c:{p['tid']}:{c['id']}"
+                if c["uin"] == bot or key in seen or now - c["time"] > 7 * 86400:
+                    continue
+                items.append({"kind": "reply", "key": key, "host": bot, "tid": p["tid"], "post": p["text"],
+                              "uin": c["uin"], "name": "TA" if c["uin"] == owner else c["name"], "text": c["text"]})
+        if owner:
+            try:
+                for p in await qz.list_posts(owner, 5):
+                    key = f"p:{p['tid']}"
+                    if key in seen or now - p["time"] > 3 * 86400:
+                        continue
+                    mine = any(c["uin"] == bot for c in p["comments"])
+                    items.append({"kind": "owner_post", "key": key, "host": owner, "tid": p["tid"],
+                                  "text": p["text"] + (f"（配了 {p['pics']} 张图）" if p["pics"] else ""),
+                                  "time": p["time"], "commented": mine,
+                                  "others": [f"{'你' if c['uin'] == bot else c['name']}：{c['text']}"
+                                             for c in p["comments"][-5:]]})
+            except QzoneError as e:
+                logger.debug(f"[大肥鱼] 看不了 TA 的空间：{e}")
+        return items[:8]
+
+    @staticmethod
+    def _fmt_qzone_items(items: list[dict]) -> str:
+        lines = []
+        for i, it in enumerate(items, 1):
+            if it["kind"] == "reply":
+                lines.append(f"[{i}] 你的说说「{it['post'][:60]}」下面，{it['name']} 评论：{it['text']}")
+            else:
+                when = dt.datetime.fromtimestamp(it["time"]).strftime("%m-%d %H:%M")
+                others = "；".join(it["others"]) or "还没人评论"
+                lines.append(f"[{i}] TA 在 {when} 发的说说：「{it['text']}」（评论：{others}）")
+        return "\n".join(lines)
+
+    async def qzone_moment(self):
+        """一个「去空间看看」的时刻：看看说说下的新评论、TA 最近的说说，回不回、评不评、发不发都由它决定。"""
+        can_post = self.store["qzone_count"] < int(self.cfg.get("qzone_daily_max", 2))  # 防封护栏
+        can_comment = self.store["qzone_comment_count"] < int(self.cfg.get("qzone_comment_daily_max", 3))
+        items = []
+        if can_comment and self.cfg.get("qzone_interact", True):
+            try:
+                qz = await self._qzone()
+                items = await self._qzone_look(qz)
+            except Exception as e:
+                logger.warning(f"[大肥鱼] 看空间失败，这次只想想发不发说说：{e}")
+        if not items:
+            if can_post:
+                await self._post_or_draft(await self.write_post(optional=True))
+            return
+
+        # 看到的都算看过了，下次不再拿出来
+        self.store["qzone_seen"] = (self.store["qzone_seen"] + [it["key"] for it in items])[-300:]
+        self.store.save()
+        for it in items:  # TA 的说说、TA 的评论是成长的原料；别人的评论不是
+            if it["kind"] == "owner_post":
+                self.growth.log("TA（发了说说）", it["text"])
+            elif it["name"] == "TA":
+                self.growth.log("TA（评论了我的说说）", f"「{it['post'][:40]}」下：{it['text']}")
+
+        posted = "\n".join(p["text"][:60] for p in self.store["posted"][-5:])
+        prompt = QZONE_PROMPT.format(
+            now=f"{dt.datetime.now():%Y-%m-%d %H:%M}",
+            items=self._fmt_qzone_items(items),
+            posted=f"\n你最近发过的说说：\n{posted}\n" if posted else "",
+            post_hint="" if can_post else "（今天发的说说已经够多了，这次先别发。）",
+        )
+        out = _parse_json(await self._llm(prompt, self._public_system() + self._mood_block()))
+        left = int(self.cfg.get("qzone_comment_daily_max", 3)) - self.store["qzone_comment_count"]
+        for c in (out.get("comments") or [])[: max(0, left)]:
+            try:
+                it = items[int(c.get("n")) - 1]
+            except (TypeError, ValueError, IndexError):
+                continue
+            text = self._clean(str(c.get("text") or ""))[:200]
+            if not text:
+                continue
+            if it["kind"] == "reply" and it["name"] != "TA":
+                text = f"回复{it['name']}：{text}"
+            try:
+                await qz.comment(it["host"], it["tid"], text)
+            except Exception as e:
+                logger.warning(f"[大肥鱼] 评论失败：{e}")
+                continue
+            self.store["qzone_comment_count"] += 1
+            self.store.save()
+            where = "TA 的说说" if it["kind"] == "owner_post" else f"我的说说下回 {it['name']}"
+            self.growth.log(f"我（在{where}评论）", text)
+        post = out.get("post")
+        if can_post and isinstance(post, str) and post.strip():
+            await self._post_or_draft(self._clean(post))
+
+    async def _post_or_draft(self, text: str):
         if not text:
             return
         self.store["qzone_count"] += 1
@@ -313,12 +503,15 @@ class Dafeiyu(Star):
             self.store.save()
 
     async def _online(self) -> bool:
-        """QQ（NapCat）现在连着吗。没连上时，到点的事都先别做，等连上再说。"""
+        """QQ（NapCat）现在连着、而且 QQ 本身在线吗。没连上时，到点的事都先别做，等连上再说。
+
+        只看 get_login_info 不够：QQ 被挤下线时 NapCat 还连着，登录信息照样拿得到，消息却发不出去。
+        """
         try:
-            await asyncio.wait_for(self._onebot().api.call_action("get_login_info"), 10)
-            return True
+            st = await asyncio.wait_for(self._onebot().api.call_action("get_status"), 10)
         except Exception:
             return False
+        return isinstance(st, dict) and st.get("online") is not False and st.get("good") is not False
 
     # ---------- 反思：把一天的经历沉淀成自己 ----------
 
@@ -343,6 +536,7 @@ class Dafeiyu(Star):
             wishes=wishes_block,
             day=day,
             log=log,
+            moods=self._day_moods(day),
             signature=self.store["signature"] or "（还没设过）",
         )
         raw = await self._llm(prompt, self._core(), self.cfg.get("reflect_provider_id", ""))
@@ -363,6 +557,90 @@ class Dafeiyu(Star):
         # 只记数量，不记内容：那是它自己的
         logger.info(f"[大肥鱼] {day} 的反思完成，自我认识改动 {len(out.get('changes') or [])} 处")
         return True
+
+    def _day_moods(self, day: str) -> str:
+        """那天和 TA 聊天时它自己记下的心情（和别人聊时记的不进反思）。"""
+        moods = [
+            m for m in self.store["moods"]
+            if m.get("with_ta") and dt.datetime.fromtimestamp(m["t"]).strftime("%Y-%m-%d") == day
+        ]
+        if not moods:
+            return ""
+        lines = "\n".join(f"[{dt.datetime.fromtimestamp(m['t']):%H:%M}] {m['text']}" for m in moods)
+        return f"\n这天你随手记下过的心情：\n<<<\n{lines}\n>>>\n"
+
+    # ---------- 上线补回：不在线时错过的事 ----------
+
+    async def _run_overdue_jobs(self):
+        """它自己定下、但当时不在线没做成的事：告诉它晚了多久，让它自己决定还做不做。"""
+        cron = getattr(self.context, "cron_manager", None)
+        if cron is None:
+            return
+        now = dt.datetime.now().astimezone()
+        for job in overdue_jobs(await cron.list_jobs("active_agent"), now, set(self.store["jobs_handled"])):
+            self.store["jobs_handled"] = (self.store["jobs_handled"] + [job.job_id])[-50:]
+            self.store.save()
+            at = job_run_at(job).astimezone()
+            note = (job.payload or {}).get("note") or job.description or job.name
+            late = (
+                f"（这件事你原本定在 {at:%m-%d %H:%M} 做。那时你不在线（电脑关着，或者 QQ 没连上），"
+                f"没能按时做。现在是 {now:%m-%d %H:%M}，晚了 {fmt_gap((now - at).total_seconds())}。"
+                "现在还做不做、怎么做、要不要提一句晚了，都由你自己决定；不做也可以。）\n\n"
+            )
+            try:
+                await cron.update_job(job.job_id, payload={**job.payload, "note": late + note})
+                await cron.run_job_now(job.job_id)
+                logger.info(f"[大肥鱼] 补上了一件当时不在线错过的事：{job.name}")
+            except Exception as e:
+                logger.error(f"[大肥鱼] 补做错过的事失败（{job.name}）：{e}", exc_info=True)
+            finally:
+                await cron.delete_job(job.job_id)
+
+    async def _reply_missed(self, since: float):
+        """不在线时 TA 发来、它还没看到的私聊：拿给它看，回不回、怎么回由它决定。"""
+        owner = str(self.cfg.get("owner_qq", "")).strip()
+        if not (owner and self.store["owner_umo"]):
+            return
+        ret = await self._onebot().api.call_action("get_friend_msg_history", user_id=int(owner), count=30)
+        msgs = unanswered(ret.get("messages") or [], owner, await self._get_bot_uin(), since)
+        # AstrBot 已经处理过的（NapCat 上线时直接推过来的）不算
+        msgs = [m for m in msgs if m.get("time", 0) > self.store["owner_last_msg"]]
+        texts = [(m["time"], plain_text(m.get("message"))) for m in msgs]
+        texts = [(t, x) for t, x in texts if x]
+        if not texts:
+            return
+        for t, x in texts:
+            # 记在今天：那天的反思多半已经做完了，记回去就再也不会被想起
+            self.growth.log("TA", f"（{dt.datetime.fromtimestamp(t):%m-%d %H:%M} 发的，那时我不在线）{x}")
+        said = "\n".join(f"[{dt.datetime.fromtimestamp(t):%m-%d %H:%M}] {x}" for t, x in texts)
+        now = dt.datetime.now()
+        prompt = (
+            f"现在是 {now:%Y-%m-%d %H:%M}。你刚刚重新上线——之前有 {fmt_gap(time.time() - since)}不在线"
+            "（电脑关着，或者 QQ 断了），这段时间 TA 给你发了这些，你现在才看到：\n"
+            f"{said}\n\n"
+            f"再往前的聊天：\n{await self._recent_history() or '（暂无）'}\n\n"
+            "要不要回、怎么回由你决定。像真人发消息一样口语、简短，多句时用换行分开；"
+            "不要解释、不要加引号，直接输出要发的内容。不想回就只输出 SKIP。"
+        )
+        text = self._clean(
+            await self._llm(prompt, self._system() + self._thoughts_block() + self._mood_block())
+        )
+        self.store["owner_last_msg"] = max(self.store["owner_last_msg"], texts[-1][0])
+        self.store.save()
+        if not text or text.upper() == "SKIP":
+            return
+        await self._send_owner(text)
+        try:  # 放进对话历史，TA 接着聊时它记得这段
+            cm = self.context.conversation_manager
+            cid = await cm.get_curr_conversation_id(self.store["owner_umo"])
+            if cid:
+                await cm.add_message_pair(
+                    cid, {"role": "user", "content": "\n".join(x for _, x in texts)},
+                    {"role": "assistant", "content": text},
+                )
+        except Exception as e:
+            logger.debug(f"[大肥鱼] 补回的对话没能写进历史：{e}")
+        logger.info(f"[大肥鱼] 上线后看到了 {len(texts)} 条错过的消息")
 
     async def _split_legacy_self(self):
         """旧版只有一份 self.md（混着 TA 的私事），拆成「我是谁」和「我和 TA 之间」。只跑一次。"""
@@ -426,6 +704,7 @@ class Dafeiyu(Star):
         self.store["day"] = today
         self.store["proactive_count"] = 0
         self.store["qzone_count"] = 0
+        self.store["qzone_comment_count"] = 0
         self.store["fixed_done"] = []
         self.store["qzone_slots"] = {
             t: random.randint(-off, off) for t in self.cfg.get("qzone_times") or []
@@ -455,6 +734,19 @@ class Dafeiyu(Star):
         # 下面的事都要通过 QQ：没连上就整轮跳过，时间点不消耗，等连上了再做
         if not await self._online():
             return
+        last_online = self.store["last_online"]
+        if last_online and ts - last_online > OFFLINE_GAP and not self.store["missed_since"]:
+            self.store["missed_since"] = last_online  # 记下从什么时候开始不在线，补回完再清掉
+            self.store["missed_after"] = ts + SETTLE_SECONDS
+        self.store["last_online"] = ts
+        self.store.save()
+        if not self._in_quiet(now):
+            await self._run_overdue_jobs()
+            if self.store["missed_since"] and ts >= self.store["missed_after"]:
+                since, self.store["missed_since"] = self.store["missed_since"], 0.0
+                self.store.save()
+                await self._reply_missed(since)
+
         if self.store["drafts_unsent"] and self.store["owner_umo"]:
             await self._send_pending_drafts()
         if self.store["pending_signature"]:
@@ -465,18 +757,21 @@ class Dafeiyu(Star):
             self.growth.log("我（换了签名）", sig)
             logger.info("[大肥鱼] 它换了个性签名")
 
+        # 超了预算：它自发的事（看空间、主动私聊）先停一停；回消息、补做答应过的事不受影响
+        over_budget = self._over_budget()
+
         if self.cfg.get("qzone_enabled", True):
             for t, off in self.store["qzone_slots"].items():
                 due = dt.datetime.combine(now.date(), _hm(t)) + dt.timedelta(minutes=off)
                 if now >= due and t not in self.store["qzone_done"]:
                     self.store["qzone_done"].append(t)
                     self.store.save()
-                    if not self._in_quiet(now):
-                        await self.scheduled_post()
+                    if not (self._in_quiet(now) or over_budget):
+                        await self.qzone_moment()
 
         if not (self.cfg.get("proactive_enabled", True) and self.store["owner_umo"]):
             return
-        if self._in_quiet(now):
+        if self._in_quiet(now) or over_budget:
             return
 
         for item in self.cfg.get("fixed_times") or []:
@@ -550,10 +845,50 @@ class Dafeiyu(Star):
             self.store["guest_seen"] = dict(sorted(seen.items(), key=lambda kv: kv[1])[-200:])
         self.store.save()
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
+    async def on_message(self, event: AstrMessageEvent):
+        """把它看不到的消息段（小黄脸、戳一戳、语音……）翻译成文字，免得被当成空消息跳过。"""
+        raw = getattr(event.message_obj, "raw_message", None)
+        segments = raw.get("message") if isinstance(raw, dict) else None
+        if not segments:
+            return
+        stt = bool((self.context.get_config().get("provider_stt_settings") or {}).get("enable"))
+        extra = describe_message(segments, stt)
+        if extra:
+            event.message_str = f"{event.message_str} {extra}".strip()
+            event.message_obj.message_str = event.message_str
+
+    async def _pending_jobs(self, umo: str) -> str:
+        """它在这个会话里给自己定下、还没到时间的事——让它知道自己答应过什么。"""
+        cron = getattr(self.context, "cron_manager", None)
+        if cron is None:
+            return ""
+        try:
+            jobs = await cron.list_jobs("active_agent")
+        except Exception:
+            return ""
+        lines = []
+        for job in jobs:
+            payload = job.payload if isinstance(job.payload, dict) else {}
+            if not job.enabled or payload.get("session") != umo:
+                continue
+            at = job_run_at(job)
+            when = f"{at.astimezone():%m-%d %H:%M}" if at else f"按「{job.cron_expression}」重复"
+            lines.append(f"- {when}：{job.name}")
+        if not lines:
+            return ""
+        return "\n\n（你在这个聊天里给自己定下的、还没到时间的事：\n" + "\n".join(lines[:10]) + "）"
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         # 它对自己的认识每晚都可能变，所以每次请求现拼
         req.system_prompt = (req.system_prompt or "") + self._self_block()
+        req.system_prompt += await self._pending_jobs(event.unified_msg_origin)
+        if self._is_cron(event):
+            # 自己定的事到点了：不是谁发来的消息，不记进对话流水
+            if self._is_owner(event) and event.is_private_chat():
+                req.system_prompt += self._bond_block() + self._thoughts_block() + self._mood_block()
+            return
         if not (self._is_owner(event) and event.is_private_chat()):
             # 别人（或群里）：只展示已经长成的自己；不带和 TA 的私事，也不进成长记录
             who = event.get_sender_name() or str(event.get_sender_id())
@@ -568,7 +903,12 @@ class Dafeiyu(Star):
                     "不要透露给你起名字的那个人的私事，也不要提你们之间的事。）"
                 )
             return
-        req.system_prompt += self._bond_block() + self._thoughts_block()
+        req.system_prompt += self._bond_block() + self._thoughts_block() + self._mood_block()
+        req.system_prompt += (
+            "\n\n## 我能做的事\n"
+            "- 想不起以前和 TA 聊过的事、或者想确认当时的原话，可以用 recall_past 翻我们的聊天记录和我的日记。\n"
+            "- 想记下此刻的心情，可以用 note_feeling，只有我自己看得到，过一阵会淡去。想记才记。"
+        )
         if self.store["owner_umo"] != event.unified_msg_origin:
             self.store["owner_umo"] = event.unified_msg_origin
             logger.info(f"[大肥鱼] 已记住 owner 的私聊会话：{event.unified_msg_origin}")
@@ -585,8 +925,37 @@ class Dafeiyu(Star):
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         # 只有和 TA 的私聊会成为成长的原料
-        if self._is_owner(event) and event.is_private_chat():
+        if self._is_owner(event) and event.is_private_chat() and not self._is_cron(event):
             self.growth.log("我", resp.completion_text or "")
+
+    # ---------- 工具：它自己想用的时候用 ----------
+
+    @filter.llm_tool(name="recall_past")
+    async def recall_past(self, event: AstrMessageEvent, query: str):
+        """翻一翻以前和 TA 的聊天记录和自己的日记，找某件事当时的原话。想不起来、或者想确认以前说过什么的时候用。
+
+        Args:
+            query(string): 想找的事，用几个关键词描述，比如「面试 紧张」
+        """
+        if not (self._is_owner(event) and event.is_private_chat()):
+            return "这些是我和 TA 之间的事，不在这里翻。"
+        hits = recall_search(self.growth.root, str(query or ""))
+        return "\n\n".join(hits) if hits else "翻了一下，没找到相关的记录。"
+
+    @filter.llm_tool(name="note_feeling")
+    async def note_feeling(self, event: AstrMessageEvent, feeling: str):
+        """记下你此刻的心情或状态。只有你自己看得到，之后一段时间里你会想起它，再久一点就淡了。想记的时候才记，不用每次都记。
+
+        Args:
+            feeling(string): 用你自己的话写此刻的感受，一两句
+        """
+        text = str(feeling or "").strip()[:200]
+        if not text:
+            return "没记。"
+        with_ta = self._is_owner(event) and event.is_private_chat()
+        self.store["moods"] = (self.store["moods"] + [{"t": time.time(), "text": text, "with_ta": with_ta}])[-30:]
+        self.store.save()
+        return "记下了。"
 
     # ---------- 指令（仅 owner 可用） ----------
 
@@ -606,9 +975,31 @@ class Dafeiyu(Star):
             f"今天说说时间点（含偏移分钟）：{s['qzone_slots']}，已处理 {s['qzone_done']}\n"
             f"今天它发了 {s['qzone_count']}/{self.cfg.get('qzone_daily_max', 2)} 条说说\n"
             f"待审核草稿：{', '.join(s['drafts']) or '无'}\n"
+            f"今天在空间评论了 {s['qzone_comment_count']}/{self.cfg.get('qzone_comment_daily_max', 3)} 条\n"
             f"免打扰：{self.cfg.get('quiet_hours') or '无'}，现在{'是' if self._in_quiet(dt.datetime.now()) else '不是'}免打扰时段\n"
-            f"上次反思：{s['reflected_day'] or '还没有'}"
+            f"上次反思：{s['reflected_day'] or '还没有'}\n"
+            f"今天大约花了 {self.spent_today():.2f} 元"
+            + (f"（预算 {self.cfg.get('daily_budget')} 元）" if float(self.cfg.get("daily_budget", 0) or 0) > 0 else "")
+            + (f"\n最近一次发送失败：{s['send_error']}" if s["send_error"] else "")
         )
+
+    @fy.command("看空间")
+    async def cmd_qzone_look(self, event: AstrMessageEvent):
+        """检查读空间是否正常：只报数量，不评论、不发、不标记已读。"""
+        if not self._is_owner(event):
+            event.stop_event()
+            return
+        try:
+            qz = await self._qzone()
+            mine = await qz.list_posts(await self._get_bot_uin(), 5)
+            items = await self._qzone_look(qz)
+            yield event.plain_result(
+                f"我最近 {len(mine)} 条说说，共 {sum(len(p['comments']) for p in mine)} 条评论；"
+                f"下次去空间时会看到 {len(items)} 条新东西"
+                f"（{sum(i['kind'] == 'reply' for i in items)} 条新评论，{sum(i['kind'] == 'owner_post' for i in items)} 条你的说说）"
+            )
+        except Exception as e:
+            yield event.plain_result(f"看空间失败：{e}")
 
     @fy.command("戳我")
     async def cmd_poke(self, event: AstrMessageEvent):
