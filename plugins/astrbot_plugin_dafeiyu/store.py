@@ -37,6 +37,8 @@ DEFAULT = {
     "usage": {},              # 插件自己当天用掉的 token {"day", "in", "cached", "out"}
     "budget_paused": "",      # 哪天超了预算（别的扩展也看这个，自发的事那天先停）
     "rhythm": {},             # 它在反思里给自己定的节奏，覆盖配置里的初始值（见 rhythm.py）
+    "voice": "",              # 它给自己挑的声音（Edge TTS 的声音名），没挑过就是空
+    "voice_count": 0,         # 当天发了几条语音（防封护栏用）
 }
 
 

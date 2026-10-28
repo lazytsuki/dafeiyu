@@ -143,6 +143,12 @@
     "default": 3,
     "hint": "防封护栏，不是对它的约束"
   },
+  "voice_daily_max": {
+    "description": "每天最多发几条语音",
+    "type": "int",
+    "default": 20,
+    "hint": "防封护栏。发不发语音、用什么声音都由它自己决定（声音用免费的 Edge TTS）"
+  },
   "daily_budget": {
     "description": "每天的花销预算（元），0 表示不限",
     "type": "float",

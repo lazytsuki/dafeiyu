@@ -7,6 +7,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+import aiohttp
+
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
@@ -15,9 +17,12 @@ from astrbot.api.star import Context, Star, register
 from .catchup import fmt_gap, job_run_at, overdue_jobs, unanswered
 from .growth import Growth
 from .qzone import QzoneClient, QzoneError
-from . import rhythm
+from astrbot.api.message_components import Record
+
+from . import rhythm, voice
 from .recall import search as recall_search
 from .senses import describe_message, plain_text
+from .stickers import Stickers
 from .store import Store, data_dir
 
 PLUGIN_DIR = Path(__file__).parent
@@ -129,13 +134,15 @@ def _parse_json(text: str) -> dict:
     return json.loads(m.group(0))
 
 
-@register("astrbot_plugin_dafeiyu", "dafeiyu", "大肥鱼：会主动找你、会发说说、会自己长大的 QQ 伙伴", "0.5.0")
+@register("astrbot_plugin_dafeiyu", "dafeiyu", "大肥鱼：会主动找你、会发说说、会自己长大的 QQ 伙伴", "0.6.0")
 class Dafeiyu(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.cfg = config
         self.store = Store()
         self.growth = Growth(data_dir())
+        self.stickers = Stickers(data_dir())
+        self._recent_images: dict[str, tuple[float, str, str]] = {}  # 会话 → (时间, 图片地址, 谁发的)
         self._bot_uin = ""
         self._task = asyncio.create_task(self._loop())
 
@@ -760,6 +767,7 @@ class Dafeiyu(Star):
         self.store["proactive_count"] = 0
         self.store["qzone_count"] = 0
         self.store["qzone_comment_count"] = 0
+        self.store["voice_count"] = 0
         self.store["fixed_done"] = []
         self._plan_qzone(now)
 
@@ -903,6 +911,13 @@ class Dafeiyu(Star):
         segments = raw.get("message") if isinstance(raw, dict) else None
         if not segments:
             return
+        for seg in segments:  # 记住刚收到的图（表情包），它想收藏时用得上
+            if not isinstance(seg, dict):
+                continue
+            data = seg.get("data") or {}
+            if seg.get("type") == "image" and data.get("url"):
+                who = "TA" if self._is_owner(event) else "别人"
+                self._recent_images[event.unified_msg_origin] = (time.time(), data["url"], who)
         stt = bool((self.context.get_config().get("provider_stt_settings") or {}).get("enable"))
         extra = describe_message(segments, stt)
         if extra:
@@ -958,7 +973,10 @@ class Dafeiyu(Star):
         req.system_prompt += (
             "\n\n## 我能做的事\n"
             "- 想不起以前和 TA 聊过的事、或者想确认当时的原话，可以用 recall_past 翻我们的聊天记录和我的日记。\n"
-            "- 想记下此刻的心情，可以用 note_feeling，只有我自己看得到，过一阵会淡去。想记才记。"
+            "- 想记下此刻的心情，可以用 note_feeling，只有我自己看得到，过一阵会淡去。想记才记。\n"
+            "- 想用语音说话，可以用 send_voice（声音由我自己用 choose_my_voice 挑）。\n"
+            "- 看到喜欢的图或表情包，可以用 keep_sticker 存进自己的收藏；想发的时候用 send_sticker 挑一张。"
+            + (f"（我现在的声音：{self.store['voice']}）" if self.store["voice"] else "")
         )
         if self.store["owner_umo"] != event.unified_msg_origin:
             self.store["owner_umo"] = event.unified_msg_origin
@@ -1007,6 +1025,111 @@ class Dafeiyu(Star):
         self.store["moods"] = (self.store["moods"] + [{"t": time.time(), "text": text, "with_ta": with_ta}])[-30:]
         self.store.save()
         return "记下了。"
+
+    @filter.llm_tool(name="choose_my_voice")
+    async def choose_my_voice(self, event: AstrMessageEvent, voice_name: str):
+        """给自己挑一个说话的声音（发语音时用）。只在你自己想挑、想换的时候用。可选的声音（说明是微软的标注）：
+        - zh-CN-XiaoxiaoNeural：女声，温暖
+        - zh-CN-XiaoyiNeural：女声，活泼
+        - zh-CN-YunxiNeural：男声，活泼、阳光
+        - zh-CN-YunjianNeural：男声，有激情
+        - zh-CN-YunxiaNeural：男声，可爱、少年感
+        - zh-CN-YunyangNeural：男声，专业、沉稳
+        - zh-CN-liaoning-XiaobeiNeural：女声，东北话，幽默
+        - zh-CN-shaanxi-XiaoniNeural：女声，陕西话，明快
+        - zh-TW-HsiaoChenNeural：女声，台湾腔，友好
+        - zh-TW-YunJheNeural：男声，台湾腔，友好
+        - zh-HK-HiuMaanNeural：女声，粤语，友好
+        - zh-HK-WanLungNeural：男声，粤语，友好
+
+        Args:
+            voice_name(string): 上面列表里的声音名，比如 zh-CN-XiaoxiaoNeural
+        """
+        if not (self._is_owner(event) and event.is_private_chat()):
+            return "我的声音是我自己的事，不在这里挑。"
+        name = str(voice_name or "").strip()
+        if name not in voice.VOICES:
+            return f"没有这个声音。能选的有：\n{voice.listing()}"
+        old = self.store["voice"]
+        self.store["voice"] = name
+        self.store.save()
+        self.growth.log("我（挑了自己的声音）", f"{name}（{voice.VOICES[name]}）" + (f"，之前是 {old}" if old else ""))
+        return f"好，以后发语音就用 {name}（{voice.VOICES[name]}）。"
+
+    @filter.llm_tool(name="send_voice")
+    async def send_voice(self, event: AstrMessageEvent, text: str):
+        """想用语音说的时候用：把这句话用你自己的声音说出来，作为 QQ 语音发过去。发不发语音、什么时候发由你决定。
+
+        Args:
+            text(string): 要说的话，口语、简短
+        """
+        text = str(text or "").strip()[:200]
+        if not text:
+            return "没有要说的话。"
+        if not self.store["voice"]:
+            if self._is_owner(event) and event.is_private_chat():
+                return f"你还没给自己挑过声音。想发语音的话，先用 choose_my_voice 挑一个：\n{voice.listing()}"
+            return "我还没有自己的声音，这次先打字吧。"
+        if self.store["voice_count"] >= int(self.cfg.get("voice_daily_max", 20)):
+            return "今天语音发得够多了（防封护栏），先打字吧。"
+        try:
+            path = await voice.synthesize(text, self.store["voice"], data_dir() / "voice_tmp")
+            await event.send(MessageChain(chain=[Record.fromFileSystem(str(path))]))
+        except Exception as e:
+            logger.warning(f"[大肥鱼] 发语音失败：{e}")
+            return f"语音没发出去（{e}），这次先打字吧。"
+        self.store["voice_count"] += 1
+        self.store.save()
+        if self._is_owner(event) and event.is_private_chat() and not self._is_cron(event):
+            self.growth.log("我（发了语音）", text)
+        return "语音发出去了。"
+
+    @filter.llm_tool(name="keep_sticker")
+    async def keep_sticker(self, event: AstrMessageEvent, note: str):
+        """把对方刚刚发来的那张图 / 表情包存进你自己的表情包收藏。只在你喜欢、想留着以后用的时候存。
+
+        Args:
+            note(string): 你自己对这张图的描述：它是什么样的、你会在什么时候想发它
+        """
+        recent = self._recent_images.get(event.unified_msg_origin)
+        if not recent or time.time() - recent[0] > 1800:
+            return "这里最近没有收到图片，没什么可存的。"
+        note = str(note or "").strip()[:100]
+        if not note:
+            return "给它写句描述再存吧，不然以后找不到。"
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as s:
+                async with s.get(recent[1]) as r:
+                    r.raise_for_status()
+                    data = await r.read()
+        except Exception as e:
+            return f"图片没下载下来（{e}），这次没存上。"
+        if not data or len(data) > 5 * 1024 * 1024:
+            return "这张图太大了（或是空的），没存。"
+        new, _ = self.stickers.keep(data, note, recent[2])
+        return "存好了。" if new else "这张之前就存过，描述更新了。"
+
+    @filter.llm_tool(name="send_sticker")
+    async def send_sticker(self, event: AstrMessageEvent, query: str = ""):
+        """从你自己收藏的表情包里挑一张发出去。发不发、发哪张由你决定。
+
+        Args:
+            query(string): 想表达的意思或关键词，会按你存的时候写的描述来找；也可以填编号。留空会列出你的收藏
+        """
+        if not self.stickers.all():
+            return "你的表情包收藏还是空的。看到喜欢的，可以用 keep_sticker 存下来。"
+        q = str(query or "").strip()
+        if not q:
+            return f"你收藏的表情包：\n{self.stickers.listing()}\n再用编号或描述挑一张。"
+        item = self.stickers.find(q)
+        if not item:
+            return f"没找到合适的。你收藏的有：\n{self.stickers.listing()}"
+        try:
+            await event.send(MessageChain().file_image(str(self.stickers.path(item))))
+        except Exception as e:
+            return f"表情包没发出去：{e}"
+        return f"发了：{item['note']}"
 
     # ---------- 指令（仅 owner 可用） ----------
 
