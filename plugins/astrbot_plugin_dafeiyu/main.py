@@ -15,6 +15,7 @@ from astrbot.api.star import Context, Star, register
 from .catchup import fmt_gap, job_run_at, overdue_jobs, unanswered
 from .growth import Growth
 from .qzone import QzoneClient, QzoneError
+from . import rhythm
 from .recall import search as recall_search
 from .senses import describe_message, plain_text
 from .store import Store, data_dir
@@ -60,7 +61,11 @@ REFLECT_PROMPT = """现在是深夜，你一个人安静下来，回想今天。
   · 写成自己的了解，不要写成设定说明书。
 - "changes"：这次改了什么，每条一句话（数组，没改就空数组）。
 - "thoughts"：心里想对 TA 说、但还没说的话（数组，可以为空）。说不说、什么时候说、怎么说，以后都由你自己决定。
-- "signature"：你的 QQ 个性签名（别人都能看到）。现在是：「{signature}」。想换就写新的，不想换就填 null。"""
+- "signature"：你的 QQ 个性签名（别人都能看到）。现在是：「{signature}」。想换就写新的，不想换就填 null。
+- "rhythm"：你自己的节奏。现在是这样的：
+{rhythm}
+  想调整就写一个对象，只写想改的部分，不想改就填 null：{{"reach_out_per_day": 每天随口找 TA 最多几次（0 到 {daily_max}），"reach_out_hours": ["HH:MM-HH:MM"]（想找 TA 的时间段，最多 3 段，空数组表示什么时候都行），"greet_times": ["HH:MM 由头"]（每天到点想不想跟 TA 说句话的时刻，最多 3 个，空数组表示不要），"post_times": ["HH:MM"]（想去 QQ 空间看看的时刻，最多 4 个）}}。
+  TA 的免打扰时段（{quiet}）你不会去打扰 TA；次数上限是为了 QQ 号不被封。这两样不用你操心。"""
 
 SPLIT_PROMPT = """下面是你之前写下的「我对自己的认识」，里面混着两类内容：
 
@@ -124,7 +129,7 @@ def _parse_json(text: str) -> dict:
     return json.loads(m.group(0))
 
 
-@register("astrbot_plugin_dafeiyu", "dafeiyu", "大肥鱼：会主动找你、会发说说、会自己长大的 QQ 伙伴", "0.4.0")
+@register("astrbot_plugin_dafeiyu", "dafeiyu", "大肥鱼：会主动找你、会发说说、会自己长大的 QQ 伙伴", "0.5.0")
 class Dafeiyu(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -538,6 +543,9 @@ class Dafeiyu(Star):
             log=log,
             moods=self._day_moods(day),
             signature=self.store["signature"] or "（还没设过）",
+            rhythm=rhythm.describe(self._rhythm()),
+            daily_max=int(self.cfg.get("daily_max", 4)),
+            quiet=self.cfg.get("quiet_hours") or "无",
         )
         raw = await self._llm(prompt, self._core(), self.cfg.get("reflect_provider_id", ""))
         out = _parse_json(raw)
@@ -551,6 +559,7 @@ class Dafeiyu(Star):
         sig = out.get("signature")
         if isinstance(sig, str) and sig.strip() and sig.strip() != self.store["signature"]:
             self.store["pending_signature"] = sig.strip()[:60]  # 等 QQ 在线时再换
+        self._adopt_rhythm(out.get("rhythm"))
         self.store["reflect_offsets"][day] = total
         self.store["reflect_offsets"] = dict(sorted(self.store["reflect_offsets"].items())[-7:])
         self.store.save()
@@ -696,26 +705,63 @@ class Dafeiyu(Star):
         t = now.time()
         return start <= t < end if start <= end else (t >= start or t < end)
 
+    # ---------- 它自己的节奏 ----------
+
+    def _rhythm(self) -> dict:
+        """现在实际用的节奏：配置是起点，它写过的部分按它的来；每日上限始终是防封护栏。"""
+        cap = int(self.cfg.get("daily_max", 4))
+        r = {
+            "reach_out_per_day": cap,
+            "reach_out_hours": [],
+            "greet_times": list(self.cfg.get("fixed_times") or []),
+            "post_times": list(self.cfg.get("qzone_times") or []),
+        }
+        if self.cfg.get("rhythm_self", True):
+            r.update(self.store["rhythm"])
+        r["reach_out_per_day"] = min(int(r["reach_out_per_day"]), cap)
+        return r
+
+    def _adopt_rhythm(self, raw):
+        """反思时它写下的节奏：认得出来的部分就用上，写错的不替它猜。"""
+        if not self.cfg.get("rhythm_self", True):
+            return
+        new = rhythm.normalize(raw, int(self.cfg.get("daily_max", 4)))
+        if not new:
+            return
+        merged = {**self.store["rhythm"], **new}
+        if merged == self.store["rhythm"]:
+            return
+        post_changed = "post_times" in new and new["post_times"] != self._rhythm()["post_times"]
+        self.store["rhythm"] = merged
+        self.store.save()
+        if post_changed:  # 今天还没到的「去空间看看」时刻，按新的来
+            self._plan_qzone(dt.datetime.now(), keep_done=True)
+        self.growth.log("我（调整了自己的节奏）", rhythm.describe(new))
+        logger.info(f"[大肥鱼] 它调整了自己的节奏：{', '.join(new)}")
+
+    def _plan_qzone(self, now: dt.datetime, keep_done: bool = False):
+        off = int(self.cfg.get("qzone_offset_minutes", 40))
+        old_done = set(self.store["qzone_done"]) if keep_done else set()
+        self.store["qzone_slots"] = {t: random.randint(-off, off) for t in self._rhythm()["post_times"]}
+        # 已经错过的时间点不补，免得一开机（或一改节奏）就连着去
+        self.store["qzone_done"] = [
+            t
+            for t, o in self.store["qzone_slots"].items()
+            if t in old_done
+            or now > dt.datetime.combine(now.date(), _hm(t)) + dt.timedelta(minutes=o + FIXED_WINDOW_MINUTES)
+        ]
+        self.store.save()
+
     def _new_day(self, now: dt.datetime):
         today = now.strftime("%Y-%m-%d")
         if self.store["day"] == today:
             return
-        off = int(self.cfg.get("qzone_offset_minutes", 40))
         self.store["day"] = today
         self.store["proactive_count"] = 0
         self.store["qzone_count"] = 0
         self.store["qzone_comment_count"] = 0
         self.store["fixed_done"] = []
-        self.store["qzone_slots"] = {
-            t: random.randint(-off, off) for t in self.cfg.get("qzone_times") or []
-        }
-        # 启动时已经错过的时间点不补发，免得一开机就连发
-        self.store["qzone_done"] = [
-            t
-            for t, o in self.store["qzone_slots"].items()
-            if now > dt.datetime.combine(now.date(), _hm(t)) + dt.timedelta(minutes=o + FIXED_WINDOW_MINUTES)
-        ]
-        self.store.save()
+        self._plan_qzone(now)
 
     async def _tick(self):
         now = dt.datetime.now()
@@ -774,7 +820,8 @@ class Dafeiyu(Star):
         if self._in_quiet(now) or over_budget:
             return
 
-        for item in self.cfg.get("fixed_times") or []:
+        r = self._rhythm()
+        for item in r["greet_times"]:
             t, _, kind = item.partition(" ")
             due = dt.datetime.combine(now.date(), _hm(t))
             late = (now - due).total_seconds() / 60
@@ -785,13 +832,17 @@ class Dafeiyu(Star):
                 await self.proactive(kind or "打个招呼")
                 return
 
-        if self.store["proactive_count"] >= int(self.cfg.get("daily_max", 4)):
+        if self.store["proactive_count"] >= r["reach_out_per_day"]:
+            return
+        if not rhythm.in_windows(now.time(), r["reach_out_hours"]):
             return
         if ts - self.store["last_proactive"] < int(self.cfg.get("min_interval_minutes", 120)) * 60:
             return
         if ts - self.store["owner_last_msg"] < int(self.cfg.get("silence_minutes", 90)) * 60:
             return
-        if random.random() < 1 / max(1, int(self.cfg.get("avg_gap_minutes", 240))):
+        # 它只在某几段时间想找 TA 时，机会集中到那几段里，一天下来的次数不至于被时间段压没
+        boost = min(4.0, 1440 / rhythm.window_minutes(r["reach_out_hours"]))
+        if random.random() < boost / max(1, int(self.cfg.get("avg_gap_minutes", 240))):
             self.store["proactive_count"] += 1
             self.store["last_proactive"] = ts
             self.store.save()
@@ -971,7 +1022,9 @@ class Dafeiyu(Star):
         s = self.store
         yield event.plain_result(
             f"你的私聊会话：{s['owner_umo'] or '未记录（先私聊我一句）'}\n"
-            f"今天主动私聊：{s['proactive_count']}/{self.cfg.get('daily_max', 4)}\n"
+            f"今天主动私聊：{s['proactive_count']}/{self._rhythm()['reach_out_per_day']}\n"
+            f"它现在的节奏{'（它自己定的）' if s['rhythm'] and self.cfg.get('rhythm_self', True) else '（配置里的初始值）'}：\n"
+            f"{rhythm.describe(self._rhythm())}\n"
             f"今天说说时间点（含偏移分钟）：{s['qzone_slots']}，已处理 {s['qzone_done']}\n"
             f"今天它发了 {s['qzone_count']}/{self.cfg.get('qzone_daily_max', 2)} 条说说\n"
             f"待审核草稿：{', '.join(s['drafts']) or '无'}\n"

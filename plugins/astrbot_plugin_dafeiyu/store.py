@@ -36,6 +36,7 @@ DEFAULT = {
     "moods": [],              # 它自己记下的心情 [{"t": ts, "text": ..., "with_ta": bool}]
     "usage": {},              # 插件自己当天用掉的 token {"day", "in", "cached", "out"}
     "budget_paused": "",      # 哪天超了预算（别的扩展也看这个，自发的事那天先停）
+    "rhythm": {},             # 它在反思里给自己定的节奏，覆盖配置里的初始值（见 rhythm.py）
 }
 
 
