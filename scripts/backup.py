@@ -98,9 +98,9 @@ def sync():
         copy_json_redacted(DATA / "cmd_config.json", DEST / "astrbot" / "cmd_config.redacted.json")
     if (RUNTIME / "local.bat").exists():
         (DEST / "machine").mkdir(exist_ok=True)
-        # 万一有人把密码之类写进了 local.bat，也打码（密码本该放 secrets.bat，它不备份）
+        # 万一有人把密码之类写进了 local.bat，也打码（密码本该放 secrets.bat，它不备份）；webhook 地址里带着 key，同样打码
         text = (RUNTIME / "local.bat").read_text("utf-8", errors="ignore")
-        text = re.sub(r'(set\s+"?\w*(?:PASSWORD|TOKEN|SECRET|KEY)\w*=)[^"\r\n]*', r"\1<redacted>", text, flags=re.I)
+        text = re.sub(r'(set\s+"?\w*(?:PASSWORD|TOKEN|SECRET|KEY|WEBHOOK)\w*=)[^"\r\n]*', r"\1<redacted>", text, flags=re.I)
         (DEST / "machine" / "local.bat").write_text(text, "utf-8")
 
 

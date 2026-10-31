@@ -14,9 +14,9 @@ DEFAULT = {
     "qzone_done": [],         # 当天已处理过的说说时间点
     "qzone_slots": {},        # 当天各说说时间点抽到的随机偏移（分钟）
     "recent_proactive": [],   # 最近主动发出的话 [{"t": ts, "text": ...}]
-    "drafts": {},             # 待审核说说草稿 {id: text}
+    "drafts": {},             # 待审核说说草稿 {id: {"text": ..., "pic": {"file", "note"} 或 None}}（旧草稿是纯文字）
     "next_draft_id": 1,
-    "posted": [],             # 已发说说 [{"t": ts, "tid": ..., "text": ...}]
+    "posted": [],             # 已发说说 [{"t": ts, "tid": ..., "text": ..., "pic": 配图的描述（配了才有）}]
     "reflected_day": "",      # 夜间反思已处理到哪一天
     "reflect_offsets": {},    # 每天的对话已经反思到第几行 {day: n}
     "thoughts": [],           # 它心里还没说出口的话，说不说由它自己
@@ -39,6 +39,9 @@ DEFAULT = {
     "rhythm": {},             # 它在反思里给自己定的节奏，覆盖配置里的初始值（见 rhythm.py）
     "voice": "",              # 它给自己挑的声音（Edge TTS 的声音名），没挑过就是空
     "voice_count": 0,         # 当天发了几条语音（防封护栏用）
+    "draw_count": 0,          # 当天画了几张图（防封 / 花销护栏，谁的会话里画的都算）
+    "plans": [],              # 它给自己记下的事 [{"id", "at": 时间戳或 0（没定时间）, "what", "made"}]（见 plans.py）
+    "next_plan_id": 1,
 }
 
 

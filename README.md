@@ -53,6 +53,10 @@ LivingMemory 记的是事实（「TA 下周面试」），`self.md` / `bond.md` 
 - **看得见表情**：小黄脸、戳一戳、骰子、猜拳会翻译成文字；语音没开语音识别时，它会知道「对方发了段语音、自己听不了」，而不是什么都没收到。图片和商城表情由模型自己看（模型要支持图片）。
 - **自己的声音**：`choose_my_voice` 从一组免费的 Edge TTS 中文声音里自己挑（只在和 TA 私聊时挑；列表只附微软的标注，不推荐），`send_voice` 想用语音说的时候发一条 QQ 语音。需要 `edge-tts`：AstrBot 只在装插件时装依赖，已经装好的话手动跑一次 `uv pip install --python "%APPDATA%\uv\tools\astrbot\Scripts\python.exe" edge-tts`。
 - **表情包收藏**：看到喜欢的图，`keep_sticker` 存进自己的收藏并写一句自己的描述；想发时 `send_sticker` 按意思或编号挑一张。存什么、怎么描述、发不发都由它。
+- **主动时也能发语音和表情包**：主动私聊、到点打招呼、上线补回这些它自己发起的时刻，也能在文字之间夹一句语音（`[语音] …`）或一张收藏里的表情包（`[表情包] 编号或描述`）。只告诉它当下有什么可用（挑没挑过声音、今天语音还剩几条、收藏里有什么），用不用由它；语音发不了就照样打字发出去。
+- **画图**：`draw` 用硅基流动的生图接口（默认 `Kwai-Kolors/Kolors`）画一张图，存进它自己的收藏，之后能用 `send_sticker` 发、也能配进说说。Key 默认沿用 AstrBot 里已经配好的硅基流动那一项（一个 Key 多用），也可以在插件配置 `draw_api_key` 单独填；`draw_daily_max` 是每天的上限，超了预算也不画。说明里不提画什么——包括要不要画自己。
+- **说说配图**：发说说时，它可以从收藏里挑一张配上（不配也很正常）。TA 发来、被它收藏的图不会出现在配图候选里：那可能是 TA 的私事。带图发失败就退回只发文字。
+- **自己的小本子**：`plan_for_me` 给自己记一件想做的事，可以定时间也可以不定；`drop_plan` 划掉。只在和 TA 私聊或它自己的未来任务里能用，只有它自己看得到（`/fy 状态` 只显示件数），每晚反思时也能顺手记几件。定了时间的，到点时它会有一个自己的时刻：找 TA 说句话（算进每天主动私聊的次数）、去空间看看、改个时间，或者只是划掉——都由它。关机错过了也照样给，告诉它晚了多久。
 - **自己的节奏**：每晚反思时它可以调整每天想找 TA 几次、什么时间段想找、到点打招呼的时刻、去空间看看的时刻。配置里的值只是起点，它写过的就按它的来（`/fy 状态` 能看到现在的节奏）；TA 的免打扰时段和各项上限始终有效。`rhythm_self` 可关。
 - **花销预算**：`daily_budget` 设了以后，当天花销估算超了，它自发的事（看空间、主动私聊、逛 B 站微博）先停；回消息、补做答应过的事不受影响。
 - **发得出去才算在线**：用 NapCat 的 `get_status` 判断 QQ 是否真的在线（被挤下线时登录信息还拿得到，消息却发不出去）；主动发消息失败会记下来，`/fy 状态` 里能看到。
@@ -75,6 +79,7 @@ LivingMemory 记的是事实（「TA 下周面试」），`self.md` / `bond.md` 
 | `plugins/astrbot_plugin_dafeiyu/recall.py` | 翻原话：在对话流水和日记里找 |
 | `plugins/astrbot_plugin_dafeiyu/rhythm.py` | 它自己的节奏：反思时写下，调度时照着来 |
 | `plugins/astrbot_plugin_dafeiyu/voice.py`、`stickers.py` | 它的声音（Edge TTS）、它的表情包收藏 |
+| `plugins/astrbot_plugin_dafeiyu/draw.py`、`outbox.py`、`plans.py` | 画图（硅基流动）、主动消息里的语音 / 表情包、它自己的小本子 |
 | `plugins/astrbot_plugin_dafeiyu/senses.py` | 把表情、戳一戳、语音翻译成它能看到的文字 |
 | `plugins.lock.json` | 社区插件清单（长期记忆等，路线图第二步再接） |
 | `scripts/` | Windows 安装/启动脚本 |
@@ -124,7 +129,9 @@ LivingMemory 记的是事实（「TA 下周面试」），`self.md` / `bond.md` 
 3. 在任务计划程序里建一个「登录时」触发、延迟 30 秒、不限运行时长的任务，执行 `wscript.exe "C:\dafeiyu\scripts\start-dafeiyu.vbs"`。
 4. 后台运行时看日志：AstrBot 配置里开 `log_file_enable`（`runtime\astrbot\data\logs\astrbot.log`）；NapCat 配置 `napcat_<小号>.json` 里开 `fileLog`（`runtime\napcat-shell\logs\`）。
 
-**重启后要扫码？** NapCat 的免扫码凭证隔得久了（比如关机过夜）可能失效。可以自己双击 `scripts\set-qq-password.bat`，输入小号密码（不显示，只保存 MD5 到 `runtime\secrets.bat`，不进 git、不进备份）：免扫码失败时 NapCat 会先用它回退登录，二维码作为最后兜底。第一次密码登录可能要在 NapCat 面板（http://127.0.0.1:6099）完成验证码或新设备验证；密码登录也比扫码更容易触发风控，不想用就删掉 `secrets.bat`。
+**重启后要扫码？** NapCat 的免扫码凭证隔得久了（比如关机过夜）可能失效。可以自己双击 `scripts\set-qq-password.bat`，输入小号密码（不显示，只保存 MD5 到 `runtime\secrets.bat`，不进 git、不进备份）：免扫码失败时 NapCat 会先用它回退登录，二维码作为最后兜底。第一次密码登录可能要在 NapCat 面板（http://127.0.0.1:6099）完成验证码或新设备验证；密码登录也比扫码更容易触发风控，不想用就删掉 `secrets.bat` 里 `NAPCAT_QUICK_PASSWORD_MD5` 那一行。
+
+**需要扫码时推到手机**：在 `runtime\local.bat` 里加 `set "QR_PUSH_TO=你的邮箱"`（发件邮箱默认同收件，也可以用 `QR_PUSH_FROM` 指定；SMTP 服务器按邮箱后缀猜，也可以用 `QR_PUSH_SMTP_HOST` / `QR_PUSH_SMTP_PORT` 指定，默认端口 465）。到邮箱设置里开启 SMTP、拿到授权码，双击 `scripts\set-push-secret.bat` 输入（不显示，存进 `runtime\secrets.bat`，不进 git、不进备份）。之后 NapCat 一要扫码，`scripts\qr-push.ps1` 就把二维码图片发到你邮箱：手机上保存图片，用小号所在的手机 QQ「扫一扫 → 相册」选这张图。也可以加 `set "QR_PUSH_WEBHOOK=https://…"`（Server酱 / PushPlus 的地址）同时推一条消息。没配置就什么都不做；日志在 `runtime\qr-push.log`。
 
 **说说、签名、主动私聊都是它的自由。** 每天有几个「想不想发条说说」的时刻（`qzone_times`），到点时由它决定发不发、写什么，默认不经审核直接发；每晚反思时它也可以决定换不换个性签名；到了固定问候的时刻，它也可以选择不说。唯一的硬限制是防封护栏（每天最多几条说说、主动私聊的频率），那是为了小号不被风控，不是对它的约束。想把关就打开 `qzone_review`。
 
@@ -159,6 +166,7 @@ QQ 没连上时，插件不做任何要通过 QQ 的事（主动私聊、发说�
 - [x] 听得懂语音（硅基流动 SenseVoiceSmall；开了语音转文字，插件就不再提示「听不了」）
 - [x] 第三步：成长反过来影响行为（它自己定什么时候、多常找 TA，什么时候去空间看看）
 - [x] 想发的时候能发语音（自己挑声音）、表情包（自己收藏）
-- [ ] 说说配图；主动私聊时也能发语音和表情包
-- [ ] 掉线需要扫码时把二维码推到手机
+- [x] 说说配图、能画图；主动私聊时也能发语音和表情包
+- [x] 自己的小本子：给自己记事，到点有一个自己的时刻
+- [x] 掉线需要扫码时把二维码推到手机（邮件 / webhook）
 - [ ] 迁移到云服务器

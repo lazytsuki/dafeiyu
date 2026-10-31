@@ -1,7 +1,7 @@
 """它自己的表情包收藏：看到喜欢的就存下来，配一句自己写的描述；想用的时候按意思挑出来。
 
 收藏什么、怎么描述、什么时候发，都是它自己的事。这里只管存和找。
-  stickers/index.json   [{"file": "ab12….gif", "note": "它写的描述", "from": "TA"/"别人", "t": ts}]
+  stickers/index.json   [{"file": "ab12….gif", "note": "它写的描述", "from": "TA"/"别人"/"我画的", "t": ts}]
   stickers/<md5>.<ext>  图片本身
 """
 
@@ -74,11 +74,21 @@ class Stickers:
             return None
         return max(scored, key=lambda s: (s[0], s[1]))[2]
 
-    def listing(self, limit: int = 60) -> str:
-        items = self.all()
-        if not items:
-            return ""
-        return "\n".join(f"{i}. {it['note']}" for i, it in enumerate(items, 1))[-limit * 40 :]
+    def listing(self, limit: int = 60, pick=None) -> str:
+        """编号 + 描述，一行一张。pick 给了就只列它挑出来的那些（编号还是整个收藏里的编号）。"""
+        lines = [f"{i}. {it['note']}" for i, it in enumerate(self.all(), 1) if pick is None or pick(it)]
+        return "\n".join(lines)[-limit * 40 :]
+
+    def number(self, file: str) -> int:
+        """某个文件在收藏里的编号（从 1 开始），没有就是 0。"""
+        for i, it in enumerate(self.all(), 1):
+            if it["file"] == file:
+                return i
+        return 0
+
+    def by_file(self, file: str) -> dict | None:
+        """按文件名找。编号会因为挪走最早存的而变，草稿里记的是文件名。"""
+        return next((it for it in self.all() if it["file"] == file), None)
 
     def path(self, item: dict) -> Path:
         return self.dir / item["file"]

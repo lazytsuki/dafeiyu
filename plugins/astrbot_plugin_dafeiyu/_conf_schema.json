@@ -149,11 +149,29 @@
     "default": 20,
     "hint": "防封护栏。发不发语音、用什么声音都由它自己决定（声音用免费的 Edge TTS）"
   },
+  "draw_api_key": {
+    "description": "画图用的硅基流动 API Key（可不填）",
+    "type": "string",
+    "default": "",
+    "hint": "留空就用 AstrBot 里已经配好的硅基流动提供商（比如语音转文字那一项）的 Key，一个 Key 多用；都没有就画不了"
+  },
+  "draw_model": {
+    "description": "画图用的模型",
+    "type": "string",
+    "default": "Kwai-Kolors/Kolors",
+    "hint": "硅基流动的生图模型名。画不画、画什么都由它自己决定"
+  },
+  "draw_daily_max": {
+    "description": "每天最多画几张图",
+    "type": "int",
+    "default": 5,
+    "hint": "防封和花销护栏，不是对它的约束；和你以外的人聊天时画的也算在里面。超了每日预算当天也不画"
+  },
   "daily_budget": {
     "description": "每天的花销预算（元），0 表示不限",
     "type": "float",
     "default": 0,
-    "hint": "超了以后当天它自发的事（看空间、主动私聊、逛 B 站微博）先停；回你和别人的消息、补做答应过的事不受影响。只是估算"
+    "hint": "超了以后当天它自发的事（看空间、主动私聊、逛 B 站微博）和画图先停；回你和别人的消息、补做答应过的事不受影响。只是估算"
   },
   "price_input": {
     "description": "模型价格：输入（元 / 百万 token）",

@@ -13,10 +13,14 @@ set "NAPCAT_LAUNCHER_PATH=%cd%\NapCatWinBootMain.exe"
 set "NAPCAT_MAIN_PATH=%cd%\napcat.mjs"
 REM Optional password fallback when quick login fails (see set-qq-password.bat); never committed or backed up
 if exist "%~dp0..\runtime\secrets.bat" call "%~dp0..\runtime\secrets.bat"
+REM qr-push.ps1 reads the mail auth code from secrets.bat itself; keep it out of QQ's environment
+set "QR_PUSH_SMTP_PASSWORD="
 if not exist "%QQPath%" (
     echo 找不到 QQ：%QQPath%
     exit /b 1
 )
+REM Push the login QR code to your phone if a scan is needed (see set-push-secret.bat); exits at once when not configured
+start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0qr-push.ps1"
 if "%~2"=="" (
     "%NAPCAT_LAUNCHER_PATH%" "%QQPath%" "%NAPCAT_INJECT_PATH%"
 ) else (
