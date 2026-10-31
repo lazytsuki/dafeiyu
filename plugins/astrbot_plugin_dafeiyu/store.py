@@ -39,9 +39,15 @@ DEFAULT = {
     "rhythm": {},             # 它在反思里给自己定的节奏，覆盖配置里的初始值（见 rhythm.py）
     "voice": "",              # 它给自己挑的声音（Edge TTS 的声音名），没挑过就是空
     "voice_count": 0,         # 当天发了几条语音（防封护栏用）
+    "burst": {},              # 防循环保险：每件事最近几分钟做过的时间 {kind: [ts]}
+    "burst_pause": {},        # 防循环保险：哪件事停到什么时候 {kind: ts}
     "draw_count": 0,          # 当天画了几张图（防封 / 花销护栏，谁的会话里画的都算）
     "plans": [],              # 它给自己记下的事 [{"id", "at": 时间戳或 0（没定时间）, "what", "made"}]（见 plans.py）
     "next_plan_id": 1,
+    "wishes": [],             # 它的心愿单，写给 TA 看的 [{"id", "text", "made"}]，TA 标了已满足的再带 "done", "note", "told"（见 wishes.py）
+    "next_wish_id": 1,
+    "next_free": 0.0,         # 下次空闲时刻的时间戳（它自己在每次空闲时定，0 = 还没排过，见 freetime.py）
+    "last_free": 0.0,         # 最近一次空闲时刻的时间（什么都没做也记在这里，不进成长流水）
 }
 
 

@@ -57,6 +57,12 @@
     "type": "bool",
     "default": true
   },
+  "free_moments": {
+    "description": "空闲时刻：它自己定什么时候醒、醒了做什么",
+    "type": "bool",
+    "default": true,
+    "hint": "开着时，它每次空闲都会自己定下次空闲的时间（5 分钟到 24 小时），空闲时能做的事（给你发消息、去空间看看、逛 B 站 / 微博、画图、记一件事）由它挑，也可以什么都不做。这时下面按概率随机主动私聊的那几项（随机主动私聊上限、间隔、沉默多久、平均多少分钟一次）和它节奏里的「每天找几次 / 时间段」不再起作用；到点打招呼、去空间的时刻、小本子、反思照旧。关掉就完全回到原来的行为"
+  },
   "quiet_hours": {
     "description": "免打扰时段（不主动私聊、不发说说）",
     "type": "string",
@@ -76,26 +82,26 @@
     "description": "每天随机主动私聊的上限",
     "type": "int",
     "default": 4,
-    "hint": "防封护栏：它自己定节奏时也不会超过这个数"
+    "hint": "防封护栏：它自己定节奏时也不会超过这个数。0 表示不限（只留防循环保险）"
   },
   "rhythm_self": {
     "description": "让它自己定节奏",
     "type": "bool",
     "default": true,
-    "hint": "开着时，每晚反思它可以调整：每天想找你几次、什么时间段想找你、到点打招呼的时刻、去空间看看的时刻。上面这些配置只是起点；免打扰时段和各项上限始终有效。关掉就回到配置里的值"
+    "hint": "开着时，每晚反思它可以调整：每天想找你几次、什么时间段想找你、到点打招呼的时刻、去空间看看的时刻。上面这些配置只是起点；免打扰时段和各项上限（设了的话）始终有效。关掉就回到配置里的值"
   },
   "min_interval_minutes": {
-    "description": "两次随机主动私聊之间至少间隔（分钟）",
+    "description": "两次随机主动私聊之间至少间隔（分钟）（开着空闲时刻时不用）",
     "type": "int",
     "default": 120
   },
   "silence_minutes": {
-    "description": "你多久没说话后它才可能主动找你（分钟）",
+    "description": "你多久没说话后它才可能主动找你（分钟）（开着空闲时刻时不用）",
     "type": "int",
     "default": 90
   },
   "avg_gap_minutes": {
-    "description": "满足条件后，平均多少分钟主动一次（越大越安静）",
+    "description": "满足条件后，平均多少分钟主动一次（越大越安静）（开着空闲时刻时不用）",
     "type": "int",
     "default": 240
   },
@@ -118,7 +124,7 @@
     "description": "每天最多发几条说说",
     "type": "int",
     "default": 2,
-    "hint": "防封护栏：发得太频繁容易被风控，不是对它的约束"
+    "hint": "防封护栏：发得太频繁容易被风控，不是对它的约束。0 表示不限"
   },
   "qzone_offset_minutes": {
     "description": "说说时间随机偏移 ±N 分钟（更像真人）",
@@ -141,16 +147,16 @@
     "description": "每天最多在空间评论几条",
     "type": "int",
     "default": 3,
-    "hint": "防封护栏，不是对它的约束"
+    "hint": "防封护栏，不是对它的约束。0 表示不限"
   },
   "voice_daily_max": {
     "description": "每天最多发几条语音",
     "type": "int",
     "default": 20,
-    "hint": "防封护栏。发不发语音、用什么声音都由它自己决定（声音用免费的 Edge TTS）"
+    "hint": "防封护栏，0 表示不限。发不发语音、用什么声音都由它自己决定（声音用免费的 Edge TTS）"
   },
   "draw_api_key": {
-    "description": "画图用的硅基流动 API Key（可不填）",
+    "description": "画图、看图用的硅基流动 API Key（可不填）",
     "type": "string",
     "default": "",
     "hint": "留空就用 AstrBot 里已经配好的硅基流动提供商（比如语音转文字那一项）的 Key，一个 Key 多用；都没有就画不了"
@@ -165,7 +171,31 @@
     "description": "每天最多画几张图",
     "type": "int",
     "default": 5,
-    "hint": "防封和花销护栏，不是对它的约束；和你以外的人聊天时画的也算在里面。超了每日预算当天也不画"
+    "hint": "防封和花销护栏，不是对它的约束，0 表示不限；和你以外的人聊天时画的也算在里面。超了每日预算当天也不画"
+  },
+  "vision_enabled": {
+    "description": "看图：把收到的图转成文字描述",
+    "type": "bool",
+    "default": true,
+    "hint": "私聊里、或在群里叫到它时收到的图，用硅基流动的视觉模型看一眼，写成「[图片：……]」交给它；它自己画的图也会看一眼，告诉它实际画成了什么样。只写客观描述（是什么、上面写了什么字）。Key 和画图共用；看不了或失败时照原来的样子（聊天模型自己看）。超了每日预算当天也不看"
+  },
+  "vision_model": {
+    "description": "看图用的模型",
+    "type": "string",
+    "default": "Qwen/Qwen3-VL-8B-Instruct",
+    "hint": "硅基流动的视觉模型名（OpenAI 兼容 chat/completions + image_url）"
+  },
+  "group_context_lines": {
+    "description": "群里被叫到时，带上群里最近几条消息",
+    "type": "int",
+    "default": 20,
+    "hint": "只记在内存里（重启就没了），不进成长记录，只是让它知道叫它之前大家在聊什么。0 表示不带"
+  },
+  "group_context_hours": {
+    "description": "群里最近的消息最多往回带几小时",
+    "type": "float",
+    "default": 3,
+    "hint": "更早的就不带了；0 表示不按时间截"
   },
   "daily_budget": {
     "description": "每天的花销预算（元），0 表示不限",

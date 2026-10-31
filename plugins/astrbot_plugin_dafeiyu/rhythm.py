@@ -47,6 +47,10 @@ def window_minutes(windows: list[str]) -> int:
     return total or 1440
 
 
+UNCAPPED_START = 6  # 不设每日上限时「每天随口找 TA 几次」的起点，它自己会改
+UNCAPPED_SANITY = 200  # 不设上限时也挡一下写错的离谱数字
+
+
 def normalize(raw, daily_max: int) -> dict | None:
     """把它在反思里写下的节奏整理成能用的样子；完全没法用就返回 None（保持原样）。
 
@@ -57,7 +61,7 @@ def normalize(raw, daily_max: int) -> dict | None:
     out = {}
     if "reach_out_per_day" in raw:
         try:
-            out["reach_out_per_day"] = max(0, min(int(raw["reach_out_per_day"]), daily_max))
+            out["reach_out_per_day"] = max(0, min(int(raw["reach_out_per_day"]), daily_max or UNCAPPED_SANITY))
         except (TypeError, ValueError):
             pass
     if isinstance(raw.get("reach_out_hours"), list):

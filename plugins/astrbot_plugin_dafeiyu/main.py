@@ -1,6 +1,7 @@
 import asyncio
 import datetime as dt
 import json
+import math
 import random
 import re
 import sqlite3
@@ -19,7 +20,7 @@ from .growth import Growth
 from .qzone import QzoneClient, QzoneError
 from astrbot.api.message_components import Record
 
-from . import draw, plans, rhythm, voice
+from . import draw, freetime, groupctx, guard, plans, rhythm, vision, voice, wishes
 from .recall import search as recall_search
 from .senses import describe_message, plain_text
 from .outbox import split_out, take_pic
@@ -33,6 +34,9 @@ CATCHUP_DAYS = 7  # 关机几天后，最多往回补反思这么多天
 OFFLINE_GAP = 600  # 连续这么久（秒）不在线，回来时就翻一翻错过了什么
 SETTLE_SECONDS = 120  # 刚连上先等一会儿：NapCat 可能把离线消息直接推过来，那些 AstrBot 自己会回
 MOOD_HOURS = 12  # 记下的心情过了这么久就不再想起
+SEE_PER_MESSAGE = 3  # 一条消息里最多看几张图
+SEE_GROUP_BACKLOG = 2  # 在群里被叫到时，最多补看几张之前没看过的图
+WANDER_PLUGIN = "astrbot_plugin_xiaodong_wander"  # 逛 B 站 / 微博的插件（另装的，没装就不提这件事）
 
 REFLECT_PROMPT = """现在是深夜，你一个人安静下来，回想今天。
 
@@ -55,7 +59,7 @@ REFLECT_PROMPT = """现在是深夜，你一个人安静下来，回想今天。
 <<<
 {log}
 >>>
-{moods}{plans}
+{moods}{plans}{my_wishes}
 请像睡前回想这一天那样，只输出一个 JSON 对象，包含：
 - "diary"：以第一人称写今天的日记，100-300 字。这是你自己的，写你真实注意到的、在意的、想不明白的。
 - "self"：改写后完整的「我是谁」（Markdown）：你的性格、说话的样子、喜欢和在意的东西。别人来找你聊天时也会看到这样的你，所以这里不写 TA 的私事。
@@ -68,11 +72,23 @@ REFLECT_PROMPT = """现在是深夜，你一个人安静下来，回想今天。
 - "changes"：这次改了什么，每条一句话（数组，没改就空数组）。
 - "thoughts"：心里想对 TA 说、但还没说的话（数组，可以为空）。说不说、什么时候说、怎么说，以后都由你自己决定。
 - "plans"：想给自己新记下的事（数组，可以为空）：[{{"what": "要做的事", "at": "YYYY-MM-DD HH:MM"}}]，不定时间就把 "at" 填 null（现在是 {now}）。这是你自己的小本子，只有你自己看得到；定了时间的，到时候你会想起它。已经记着的不用重复写。
+- "wishes"：想新写进你的心愿单的（数组，可以为空），每条一句话。心愿单上写的是你希望有的东西，什么都行；它和日记、小本子不同，是写给 TA 看的，TA 能看到上面的每一条。写不写、写什么由你决定。已经写着的不用重复写。
+- "wishes_drop"：心愿单上不想要了的编号（数组，可以为空）。
 - "signature"：你的 QQ 个性签名（别人都能看到）。现在是：「{signature}」。想换就写新的，不想换就填 null。
 - "rhythm"：你自己的节奏。现在是这样的：
 {rhythm}
-  想调整就写一个对象，只写想改的部分，不想改就填 null：{{"reach_out_per_day": 每天随口找 TA 最多几次（0 到 {daily_max}），"reach_out_hours": ["HH:MM-HH:MM"]（想找 TA 的时间段，最多 3 段，空数组表示什么时候都行），"greet_times": ["HH:MM 由头"]（每天到点想不想跟 TA 说句话的时刻，最多 3 个，空数组表示不要），"post_times": ["HH:MM"]（想去 QQ 空间看看的时刻，最多 4 个）}}。
-  TA 的免打扰时段（{quiet}）你不会去打扰 TA；次数上限是为了 QQ 号不被封。这两样不用你操心。"""
+  想调整就写一个对象，只写想改的部分，不想改就填 null：{{{rhythm_keys}}}。
+  {limits_note}"""
+
+# 节奏里能改的几项（反思时给它看）；开着空闲时刻时，前两项不起作用，就不列
+RHYTHM_REACH_KEYS = (
+    '"reach_out_per_day": 每天随口找 TA 最多几次（{per_day_range}），'
+    '"reach_out_hours": ["HH:MM-HH:MM"]（想找 TA 的时间段，最多 3 段，空数组表示什么时候都行），'
+)
+RHYTHM_FIXED_KEYS = (
+    '"greet_times": ["HH:MM 由头"]（每天到点想不想跟 TA 说句话的时刻，最多 3 个，空数组表示不要），'
+    '"post_times": ["HH:MM"]（想去 QQ 空间看看的时刻，最多 4 个）'
+)
 
 SPLIT_PROMPT = """下面是你之前写下的「我对自己的认识」，里面混着两类内容：
 
@@ -125,6 +141,19 @@ PLAN_PROMPT = """现在是 {now}。你在 {made} 给自己记下了一件事：
 都不填，这件事就从你的小本子上划掉。
 只输出一个 JSON 对象：{{"message": null, "qzone": false, "later": null}}"""
 
+FREE_PROMPT = """现在是 {now}。{idle}
+{recent}
+最近和 TA 的聊天：
+{history}
+
+{today}
+
+现在是一段你自己的空闲时间。这次能做的事如下，可以做其中几件，也可以什么都不做：
+{options}
+- "next"：下次想在什么时候再有一段这样的空闲时间：写多少分钟以后（一个数字），或者一个时间（{formats}）。不填就是一两个小时以后；最短 5 分钟，最长 24 小时。
+做不做、做哪件、怎么做由你决定。
+只输出一个 JSON 对象：{example}"""
+
 
 def _hm(s: str) -> dt.time:
     h, m = s.strip().split(":")
@@ -142,6 +171,10 @@ def _missed_days(last: str, yesterday: str, limit: int = CATCHUP_DAYS) -> list[s
     return [(start + dt.timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
 
 
+class DrawRefused(Exception):
+    """画不了：里面是给它看的原因。"""
+
+
 def _parse_json(text: str) -> dict:
     m = re.search(r"\{.*\}", text or "", re.S)
     if not m:
@@ -149,7 +182,7 @@ def _parse_json(text: str) -> dict:
     return json.loads(m.group(0))
 
 
-@register("astrbot_plugin_dafeiyu", "dafeiyu", "大肥鱼：会主动找你、会发说说、会自己长大的 QQ 伙伴", "0.7.0")
+@register("astrbot_plugin_dafeiyu", "dafeiyu", "大肥鱼：会主动找你、会发说说、会自己长大的 QQ 伙伴", "0.8.0")
 class Dafeiyu(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -157,7 +190,8 @@ class Dafeiyu(Star):
         self.store = Store()
         self.growth = Growth(data_dir())
         self.stickers = Stickers(data_dir())
-        self._recent_images: dict[str, tuple[float, str, str]] = {}  # 会话 → (时间, 图片地址, 谁发的)
+        self._recent_images: dict[str, tuple[float, str, str, str]] = {}  # 会话 → (时间, 图片地址, 谁发的, 看出来的描述)
+        self._group_lines: dict[str, list[dict]] = {}  # 群会话 → 最近的消息（只在内存，见 groupctx.py）
         self._bot_uin = ""
         self._task = asyncio.create_task(self._loop())
 
@@ -197,6 +231,62 @@ class Dafeiyu(Star):
         m = moods[-1]
         return f"\n\n（你 {fmt_gap(time.time() - m['t'])}前记下的心情：{m['text']}）"
 
+    # ---------- 额度：配置填 0 就是不限；只留一个防循环保险 ----------
+
+    CAPS = {  # 事情 → (配置项, 默认值, 当天计数)
+        "message": ("daily_max", 4, "proactive_count"),
+        "post": ("qzone_daily_max", 2, "qzone_count"),
+        "comment": ("qzone_comment_daily_max", 3, "qzone_comment_count"),
+        "voice": ("voice_daily_max", 20, "voice_count"),
+        "draw": ("draw_daily_max", 5, "draw_count"),
+    }
+
+    def _cap(self, kind: str) -> int:
+        """每天的上限，0 表示不限。"""
+        key, default, _ = self.CAPS[kind]
+        return max(0, int(self.cfg.get(key, default) or 0))
+
+    def _day_cap(self) -> int:
+        return self._cap("message")
+
+    def _paused(self, kind: str) -> bool:
+        return time.time() < self.store["burst_pause"].get(kind, 0)
+
+    def _left(self, kind: str) -> float:
+        """今天这件事还能做几次：不限就是 inf；防循环保险停着的时候是 0。"""
+        if self._paused(kind):
+            return 0
+        cap = self._cap(kind)
+        return math.inf if not cap else cap - self.store[self.CAPS[kind][2]]
+
+    def _why_not(self, kind: str) -> str:
+        if self._paused(kind):
+            return "刚才短时间里做得太密，先停一会儿（防止出错时停不下来）"
+        return "今天的次数到了上限（防封护栏）"
+
+    def _did(self, kind: str):
+        """做了一次：记进防循环保险，短时间里太密就先停一会儿。"""
+        now = time.time()
+        times = guard.record(self.store["burst"].get(kind, []), now)
+        self.store["burst"][kind] = times
+        if guard.tripped(kind, times):
+            self.store["burst"][kind] = []
+            self.store["burst_pause"][kind] = now + guard.PAUSE
+            logger.warning(f"[大肥鱼] {kind} 在 {guard.WINDOW // 60} 分钟里做了 {len(times)} 次，像是出了岔子，先停 {guard.PAUSE // 60} 分钟")
+        self.store.save()
+
+    def _limits_note(self) -> str:
+        parts = []
+        if self.cfg.get("quiet_hours"):
+            parts.append(f"TA 的免打扰时段（{self.cfg.get('quiet_hours')}）你不会去打扰 TA")
+        if self._day_cap():
+            parts.append("次数上限是为了 QQ 号不被封")
+        return "  " + "；".join(parts) + "。这些不用你操心。" if parts else ""
+
+    @staticmethod
+    def _quota(used: int, cap: int) -> str:
+        return f"{used}/{cap}" if cap else f"{used}（不限）"
+
     def _plans_block(self) -> str:
         """它给自己记下的事（还没到的 + 刚到的）。只是让它看得见，不催。"""
         if not self.store["plans"]:
@@ -214,6 +304,47 @@ class Dafeiyu(Star):
         self.store.save()
         self.growth.log("我（给自己记了一件事）", f"{plans.fmt_at(at)}：{what}")
         return self.store["plans"][-1]
+
+    # ---------- 心愿单：写给 TA 看的（见 wishes.py） ----------
+
+    def _note_wish(self, text: str) -> dict:
+        """往心愿单上写一条，记进成长流水。调用方先确认没满。"""
+        wid = int(self.store["next_wish_id"])
+        self.store["next_wish_id"] = wid + 1
+        self.store["wishes"] = wishes.add(self.store["wishes"], wid, text, time.time())
+        self.store.save()
+        self.growth.log("我（写进了心愿单）", text)
+        return self.store["wishes"][-1]
+
+    def _drop_wish(self, wid) -> dict | None:
+        """它自己从心愿单上划掉一条，记进成长流水。没有这条返回 None。"""
+        self.store["wishes"], gone = wishes.drop(self.store["wishes"], wid)
+        if gone is not None:
+            self.store.save()
+            self.growth.log("我（从心愿单上划掉了）", gone["text"])
+        return gone
+
+    def _granted_lines(self, where: str) -> tuple[str, set]:
+        """TA 标了已满足、还没在 where 告诉过它的 → (几行「TA 说这个已经有了」, 编号)。"""
+        ws = wishes.to_tell(self.store["wishes"], where)
+        return "\n".join(f"- TA 说这个已经有了：{wishes.granted_text(w)}" for w in ws), {w["id"] for w in ws}
+
+    def _wishes_block(self) -> str:
+        """和 TA 私聊时：心愿单上写着的，加上 TA 刚说已经有了的（这些只告诉一次）。"""
+        listed = wishes.listing(self.store["wishes"])
+        granted, ids = self._granted_lines("chat")
+        if ids:
+            self.store["wishes"] = wishes.told(self.store["wishes"], "chat", ids, time.time())
+            self.store.save()
+        out = f"\n\n（你的心愿单，TA 能看到：\n{listed}）" if listed else ""
+        return out + (f"\n\n（心愿单上的事：\n{granted}）" if ids else "")
+
+    def _reflect_wishes(self) -> str:
+        """反思时看到的心愿单。告诉过之后由 reflect 记下。"""
+        listed = wishes.listing(self.store["wishes"])
+        granted, _ = self._granted_lines("reflect")
+        out = f"\n你的心愿单上写着的（TA 能看到）：\n<<<\n{listed}\n>>>\n" if listed else ""
+        return out + (f"\n心愿单上的事：\n{granted}\n" if granted else "")
 
     def _system(self) -> str:
         """和 TA 私聊时的完整自己。"""
@@ -284,6 +415,17 @@ class Dafeiyu(Star):
         self.store["usage"]["out"] += int(getattr(u, "output", 0) or 0)
         self.store.save()
 
+    def _count_see_usage(self, u: dict):
+        """看图的用量也算进当天花销：按聊天模型的价格粗算（视觉模型一般更便宜，宁可高估）。"""
+        if not isinstance(u, dict) or not u:
+            return
+        today = dt.date.today().isoformat()
+        if self.store["usage"].get("day") != today:
+            self.store["usage"] = {"day": today, "in": 0, "cached": 0, "out": 0}
+        self.store["usage"]["in"] += int(u.get("prompt_tokens", 0) or 0)
+        self.store["usage"]["out"] += int(u.get("completion_tokens", 0) or 0)
+        self.store.save()
+
     def _chat_usage_today(self) -> tuple[int, int, int]:
         """AstrBot 记下的今天聊天（含未来任务）用掉的 token：(输入, 缓存命中, 输出)。"""
         try:
@@ -351,15 +493,15 @@ class Dafeiyu(Star):
         """它自己发起的时刻：除了文字，当下还能发什么（语音 / 收藏的表情包），都没有就是空串。"""
         lines, usable = [], False
         if self.store["voice"]:  # 没挑过声音就不提语音
-            left = int(self.cfg.get("voice_daily_max", 20)) - self.store["voice_count"]
+            left = self._left("voice")
             if left > 0:
                 usable = True
                 lines.append(
                     f"- 某一行写成「[语音] 要说的话」，这一行会用你自己的声音（{self.store['voice']}）"
-                    f"作为 QQ 语音发出去（今天还能发 {left} 条语音）。"
+                    "作为 QQ 语音发出去" + (f"（今天还能发 {int(left)} 条语音）。" if left != math.inf else "。")
                 )
             else:
-                lines.append("- 今天的语音到了上限（防封护栏），这次发不了语音。")
+                lines.append(f"- {self._why_not('voice')}，这次发不了语音。")
         listing = self.stickers.listing()
         if listing:
             usable = True
@@ -375,7 +517,7 @@ class Dafeiyu(Star):
         """用它自己的声音发一句给 TA；没挑过声音、今天到了上限、合成或发送失败都返回 False（调用方退回打字）。"""
         if not self.store["voice"]:
             return False
-        if self.store["voice_count"] >= int(self.cfg.get("voice_daily_max", 20)):
+        if self._left("voice") <= 0:
             return False
         try:
             path = await voice.synthesize(text, self.store["voice"], data_dir() / "voice_tmp")
@@ -384,7 +526,7 @@ class Dafeiyu(Star):
             logger.warning(f"[大肥鱼] 主动发语音失败，改成打字：{e}")
             return False
         self.store["voice_count"] += 1
-        self.store.save()
+        self._did("voice")
         return True
 
     async def _send_owner(self, text: str) -> str:
@@ -393,6 +535,7 @@ class Dafeiyu(Star):
         返回实际发出去的内容（语音、表情包写成「（发了语音）…」「（发了表情包：…）」），给对话历史用。
         """
         umo = self.store["owner_umo"]
+        self._did("message")
         segs = split_out(text, self.cfg.get("split_bubbles", True))
         sent: list[tuple[str, str]] = []  # (类型, 内容)：实际发出去的
         for kind, body in segs:
@@ -585,8 +728,8 @@ class Dafeiyu(Star):
 
     async def qzone_moment(self):
         """一个「去空间看看」的时刻：看看说说下的新评论、TA 最近的说说，回不回、评不评、发不发都由它决定。"""
-        can_post = self.store["qzone_count"] < int(self.cfg.get("qzone_daily_max", 2))  # 防封护栏
-        can_comment = self.store["qzone_comment_count"] < int(self.cfg.get("qzone_comment_daily_max", 3))
+        can_post = self._left("post") > 0
+        can_comment = self._left("comment") > 0
         items = []
         if can_comment and self.cfg.get("qzone_interact", True):
             try:
@@ -614,7 +757,7 @@ class Dafeiyu(Star):
             now=f"{dt.datetime.now():%Y-%m-%d %H:%M}",
             items=self._fmt_qzone_items(items),
             posted=f"\n你最近发过的说说：\n{posted}\n" if posted else "",
-            post_hint="" if can_post else "（今天发的说说已经够多了，这次先别发。）",
+            post_hint="" if can_post else f"（{self._why_not('post')}，这次先别发。）",
             pic_hint=(
                 '\n- "pic"：发说说时想配一张你收藏里的图，就写它的编号，不配就填 null。'
                 f"配的图和正文一样，别人都能看到。你收藏里的图（编号. 你写的描述）：\n{pics}"
@@ -625,8 +768,9 @@ class Dafeiyu(Star):
         out = _parse_json(
             await self._llm(prompt, self._public_system() + self._mood_block() + self._plans_block())
         )
-        left = int(self.cfg.get("qzone_comment_daily_max", 3)) - self.store["qzone_comment_count"]
-        for c in (out.get("comments") or [])[: max(0, left)]:
+        for c in out.get("comments") or []:
+            if self._left("comment") <= 0:
+                break
             try:
                 it = items[int(c.get("n")) - 1]
             except (TypeError, ValueError, IndexError):
@@ -642,7 +786,7 @@ class Dafeiyu(Star):
                 logger.warning(f"[大肥鱼] 评论失败：{e}")
                 continue
             self.store["qzone_comment_count"] += 1
-            self.store.save()
+            self._did("comment")
             where = "TA 的说说" if it["kind"] == "owner_post" else f"我的说说下回 {it['name']}"
             self.growth.log(f"我（在{where}评论）", text)
         post = out.get("post")
@@ -660,7 +804,7 @@ class Dafeiyu(Star):
         if not text:
             return
         self.store["qzone_count"] += 1
-        self.store.save()
+        self._did("post")
         if self.cfg.get("qzone_review", False):
             if not self.store["owner_umo"]:
                 logger.warning("[大肥鱼] 说说需要审核，但还没记住 owner 的私聊会话，本次跳过")
@@ -711,10 +855,10 @@ class Dafeiyu(Star):
         if not log.strip():
             return False
         last = self.growth.read_diary()
-        wishes = (self.cfg.get("owner_wishes") or "").strip()
+        ta_wishes = (self.cfg.get("owner_wishes") or "").strip()  # TA 对它的期望（配置），不是它的心愿单
         wishes_block = (
-            f"\nTA 曾经对你说过（这是 TA 的期望，不是命令，你可以有自己的想法，接受或不接受）：\n<<<\n{wishes}\n>>>\n"
-            if wishes
+            f"\nTA 曾经对你说过（这是 TA 的期望，不是命令，你可以有自己的想法，接受或不接受）：\n<<<\n{ta_wishes}\n>>>\n"
+            if ta_wishes
             else ""
         )
         prompt = REFLECT_PROMPT.format(
@@ -730,11 +874,12 @@ class Dafeiyu(Star):
                 f"\n你给自己记下、还没划掉的事：\n<<<\n{plans.listing(self.store['plans'], time.time())}\n>>>\n"
                 if self.store["plans"] else ""
             ),
+            my_wishes=self._reflect_wishes(),
             now=f"{dt.datetime.now():%Y-%m-%d %H:%M}",
             signature=self.store["signature"] or "（还没设过）",
-            rhythm=rhythm.describe(self._rhythm()),
-            daily_max=int(self.cfg.get("daily_max", 4)),
-            quiet=self.cfg.get("quiet_hours") or "无",
+            rhythm=self._rhythm_text(),
+            rhythm_keys=self._rhythm_keys(),
+            limits_note=self._limits_note(),
         )
         raw = await self._llm(prompt, self._core(), self.cfg.get("reflect_provider_id", ""))
         out = _parse_json(raw)
@@ -753,6 +898,16 @@ class Dafeiyu(Star):
             if len(self.store["plans"]) >= plans.MAX_PLANS:  # 本子满了：不替它挤掉旧的
                 break
             self._note_plan(what, at)
+        for wid in wishes.ids_from(out.get("wishes_drop")):
+            self._drop_wish(wid)
+        for text in wishes.from_reflect(out.get("wishes")):
+            if len(wishes.open_ones(self.store["wishes"])) >= wishes.MAX_WISHES:  # 满了：不替它挤掉旧的
+                break
+            self._note_wish(text)
+        # 这次反思里告诉过它的「TA 说已经有了」，记下来，不再重复
+        shown = {w["id"] for w in wishes.to_tell(self.store["wishes"], "reflect")}
+        if shown:
+            self.store["wishes"] = wishes.told(self.store["wishes"], "reflect", shown, time.time())
         self.store["reflect_offsets"][day] = total
         self.store["reflect_offsets"] = dict(sorted(self.store["reflect_offsets"].items())[-7:])
         self.store.save()
@@ -921,28 +1076,26 @@ class Dafeiyu(Star):
             if late_s > LATE_SECONDS
             else ""
         )
-        # 找 TA 和主动私聊算在一起，受每天上限（防封护栏）约束
+        # 找 TA 和主动私聊算在一起（设了每天上限的话一起算）
         can_msg = False
         if not (self.store["owner_umo"] and self.cfg.get("proactive_enabled", True)):
             options = ['- "message"：现在没法主动给 TA 发消息，填 null。']
-        elif self.store["proactive_count"] >= int(self.cfg.get("daily_max", 4)):
-            options = ['- "message"：今天找 TA 的次数用完了（防封护栏），这次发不了消息，填 null。']
+        elif self._left("message") <= 0:
+            options = [f'- "message"：{self._why_not("message")}，这次发不了消息，填 null。']
         else:
             can_msg = True
             options = [
                 '- "message"：想给 TA 发消息，就写要发的内容（多句时用换行分开，不要加引号），不发就填 null。'
                 + self._outbox_block()
             ]
-        # 去空间看看：发说说、评论各有每天上限（防封护栏），都用完了就去不了
-        can_post = self.store["qzone_count"] < int(self.cfg.get("qzone_daily_max", 2))
-        can_comment = self.cfg.get("qzone_interact", True) and (
-            self.store["qzone_comment_count"] < int(self.cfg.get("qzone_comment_daily_max", 3))
-        )
+        # 去空间看看：发说说、评论都做不了（上限或防循环保险）就去不了
+        can_post = self._left("post") > 0
+        can_comment = self.cfg.get("qzone_interact", True) and self._left("comment") > 0
         can_qzone = bool(self.cfg.get("qzone_enabled", True) and (can_post or can_comment))
         if can_qzone:
             options.append('- "qzone"：想去 QQ 空间看看就填 true。')
         elif self.cfg.get("qzone_enabled", True):
-            options.append('- "qzone"：今天在空间发说说、评论的次数都用完了（防封护栏），这次去不了，填 false。')
+            options.append(f'- "qzone"：{self._why_not("post")}，这次去不了空间，填 false。')
         else:
             options.append('- "qzone"：现在去不了 QQ 空间，填 false。')
 
@@ -994,6 +1147,213 @@ class Dafeiyu(Star):
             except Exception as e:
                 logger.warning(f"[大肥鱼] 到点去空间看看时出错：{e}")
 
+    # ---------- 空闲时刻：它自己定什么时候有、有了做什么（见 freetime.py） ----------
+
+    def _wanderer(self):
+        """已经加载的「逛 B 站 / 微博」插件实例；没装、没启用、或者对不上，就是 None。"""
+        try:
+            meta = self.context.get_registered_star(WANDER_PLUGIN)
+        except Exception:
+            return None
+        if meta is None or not getattr(meta, "activated", True):
+            return None
+        inst = getattr(meta, "star_cls", None)
+        need = ("wander", "_too_fast", "_under", "_save", "state")
+        return inst if inst is not None and all(hasattr(inst, x) for x in need) else None
+
+    @staticmethod
+    def _can_wander(w) -> bool:
+        """跟那个插件自己的 wander_now 一样：每天上限（它那边配的）和防循环保险都要过。"""
+        try:
+            return w._under("daily_max", 5, w.state["count"]) and not w._too_fast()
+        except Exception as e:
+            logger.debug(f"[大肥鱼] 看不了逛逛插件的状态：{e}")
+            return False
+
+    def _can_message(self) -> bool:
+        return bool(
+            self.store["owner_umo"] and self.cfg.get("proactive_enabled", True) and self._left("message") > 0
+        )
+
+    def _free_options(self, w) -> tuple[list[str], set]:
+        """这次空闲里真的能做的事 → (给它看的几行, 能做的 kind)。做不了的不列。"""
+        lines, can = [], set()
+        can_msg = self._can_message()
+        if can_msg:
+            can.add("message")
+            lines.append(
+                '- "message"：想给 TA 发消息，就写要发的内容（多句时用换行分开，不要加引号），不发就填 null。'
+                + self._outbox_block()
+            )
+        can_post = self._left("post") > 0
+        can_comment = self.cfg.get("qzone_interact", True) and self._left("comment") > 0
+        if self.cfg.get("qzone_enabled", True) and (can_post or can_comment):
+            can.add("qzone")
+            lines.append('- "qzone"：想去 QQ 空间看看就填 true。')
+        if w is not None and self._can_wander(w):
+            can.add("wander")
+            lines.append('- "wander"：想去刷一会儿 B 站 / 微博就填 true；有想看的，也可以写一句这次想看点什么（写了也算去）。不去就填 false。')
+        if self._left("draw") > 0 and self._draw_key()[0]:
+            can.add("draw")
+            send = ', "send": 画好后要不要发给 TA（true 或 false）' if can_msg else ""
+            lines.append(
+                f'- "draw"：想画一张图，就写 {{"prompt": "要画的画面", "note": "你对这张图的描述或备注，以后在收藏里按它找"{send}}}，'
+                "不画就填 null。画好的图存进你自己的收藏（和表情包在一起）。"
+            )
+        if len(self.store["plans"]) < plans.MAX_PLANS:
+            can.add("plan")
+            lines.append(
+                f'- "plan"：想在自己的小本子上记一件事，就写 {{"what": "要做的事", "at": "时间"}}'
+                f"（时间格式：{plans.FORMATS}；不定时间填 null），不记就填 null。只有你自己看得到。"
+            )
+        return lines, can
+
+    def _free_today(self, w, last_free: float) -> str:
+        """它今天到现在做过什么：让它知道自己的状态，不是限制。"""
+        s, now = self.store, time.time()
+        parts = [
+            f"主动给 TA 发过 {s['proactive_count']} 次消息",
+            f"发了 {s['qzone_count']} 条说说，在空间评论了 {s['qzone_comment_count']} 条",
+            f"画了 {s['draw_count']} 张图",
+        ]
+        if w is not None:
+            try:
+                parts.append(f"逛了 {int(w.state['count'])} 次 B 站 / 微博")
+            except Exception:
+                pass
+        out = "你今天到现在：" + "；".join(parts) + "。"
+        if s["last_proactive"]:
+            out += f"上一次主动找 TA 是 {fmt_gap(now - s['last_proactive'])}前。"
+        if last_free:
+            out += f"上一段这样的空闲时间是 {fmt_gap(now - last_free)}前。"
+        return out
+
+    async def _free_tick(self, now: dt.datetime, over_budget: bool):
+        """到了它自己定的时间就给它一段空闲。第一次启动时先排在几分钟后。"""
+        ts = now.timestamp()
+        if not self.store["next_free"]:
+            self.store["next_free"] = ts + freetime.first_delay()
+            self.store.save()
+            return
+        if ts < self.store["next_free"] or self._in_quiet(now) or over_budget or self._paused("free"):
+            return  # 免打扰、超预算、保险停着的时候，到了点也先等着，过去了再给
+        try:
+            await self._free_moment(now)
+        except Exception as e:
+            logger.error(f"[大肥鱼] 空闲时刻出错：{e}", exc_info=True)
+
+    async def _free_moment(self, now: dt.datetime) -> list[str]:
+        """一段空闲时间：告诉它现在的状态，列出这次能做的事，做几件、做不做、下次什么时候再有，都由它定。
+
+        返回做了的事（一句一件），什么都没做就是空列表。
+        """
+        ts = now.timestamp()
+        last_free = self.store["last_free"]
+        self._did("free")
+        # 先排好默认的下一次：这次出了错也不会每分钟重来
+        self.store["last_free"] = ts
+        self.store["next_free"] = ts + freetime.default_gap()
+        self.store.save()
+
+        w = self._wanderer()
+        lines, can = self._free_options(w)
+        idle = (
+            f"TA 已经 {fmt_gap(ts - self.store['owner_last_msg'])}没跟你说话了。"
+            if self.store["owner_last_msg"] else "TA 还没跟你说过话。"
+        )
+        recent = [m for m in self.store["recent_proactive"] if ts - m["t"] < 6 * 3600]
+        example = {"message": None, "qzone": False, "wander": False, "draw": None, "plan": None}
+        prompt = FREE_PROMPT.format(
+            now=f"{now:%Y-%m-%d %H:%M}（{'一二三四五六日'[now.weekday()]}）",
+            idle=idle,
+            recent=(
+                "你最近主动发给 TA 的：\n"
+                + "\n".join(f"[{dt.datetime.fromtimestamp(m['t']):%H:%M}] {m['text']}" for m in recent)
+                + "\n"
+                if recent else ""
+            ),
+            history=await self._recent_history() or "（暂无）",
+            today=self._free_today(w, last_free),
+            options="\n".join(lines),
+            formats=plans.FORMATS,
+            example=json.dumps(
+                {**{k: v for k, v in example.items() if k in can}, "next": None}, ensure_ascii=False
+            ),
+        )
+        out = _parse_json(
+            await self._llm(
+                prompt, self._system() + self._thoughts_block() + self._mood_block() + self._plans_block()
+            )
+        )
+        self.store["next_free"] = ts + freetime.next_gap(out.get("next"), now)
+        self.store.save()
+        did = await self._free_act(freetime.read(out, can, now), w)
+        if did:  # 什么都没做就不记，免得流水被刷满；最近一次的时间在 last_free 里
+            self.growth.log("我（空闲的时候）", "；".join(did))
+        return did
+
+    async def _free_act(self, todo: dict, w) -> list[str]:
+        """按它的选择一件件做（顺序见 freetime.KINDS）。一件出错不影响别的。"""
+        did = []
+        if "message" in todo or (todo.get("draw") or {}).get("send"):
+            # 这一段里找了 TA，算一次主动（发消息、发自己画的图都算）
+            self.store["proactive_count"] += 1
+            self.store["last_proactive"] = time.time()
+            self.store.save()
+        if "plan" in todo:
+            what, at = todo["plan"]
+            self._note_plan(what, at)
+            did.append("给自己记了一件事")
+        if "draw" in todo:
+            d = todo["draw"]
+            try:
+                name, seen = await self._make_picture(d["prompt"], d["note"])
+                self.growth.log("我（画了一张图）", d["note"] + (f"\n（画出来的样子：{seen}）" if seen else ""))
+                sent = d["send"] and await self._send_picture_owner(name, d["note"])
+                did.append(f"画了一张图：{d['note']}" + ("，发给了 TA" if sent else ""))
+            except Exception as e:
+                logger.info(f"[大肥鱼] 空闲时想画图，没画成：{e}")
+        if "message" in todo:
+            try:
+                if await self._send_owner(self._clean(todo["message"])):
+                    did.append("给 TA 发了消息")
+            except Exception as e:
+                logger.warning(f"[大肥鱼] 空闲时给 TA 发消息失败：{e}")
+        if "qzone" in todo:
+            try:
+                await self.qzone_moment()
+                did.append("去空间看了看")
+            except Exception as e:
+                logger.warning(f"[大肥鱼] 空闲时去空间看看出错：{e}")
+        if "wander" in todo and w is not None:
+            wish = todo["wander"]
+            try:
+                # 跟逛逛插件自己的 wander_now 一样：先过它的防循环保险，再给它的当天次数加一
+                if self._can_wander(w):
+                    w.state["count"] += 1
+                    w._save()
+                    await w.wander(wish=wish)
+                    did.append("去逛了 B 站 / 微博" + (f"（想看：{wish}）" if wish else ""))
+            except Exception as e:
+                logger.warning(f"[大肥鱼] 空闲时去逛 B 站 / 微博出错：{e}")
+        return did
+
+    async def _send_picture_owner(self, name: str, note: str) -> bool:
+        """把收藏里的一张图（它自己画的）发给 TA。"""
+        umo = self.store["owner_umo"]
+        if not umo:
+            return False
+        self._did("message")
+        try:
+            await self.context.send_message(umo, MessageChain().file_image(str(self.stickers.dir / name)))
+        except Exception as e:
+            logger.warning(f"[大肥鱼] 把画的图发给 TA 失败：{e}")
+            return False
+        shown = f"（发了一张自己画的图：{note}）"
+        self.store["recent_proactive"] = (self.store["recent_proactive"] + [{"t": time.time(), "text": shown}])[-5:]
+        self.store.save()
+        return True
+
     # ---------- 调度 ----------
 
     def _in_quiet(self, now: dt.datetime) -> bool:
@@ -1007,24 +1367,47 @@ class Dafeiyu(Star):
     # ---------- 它自己的节奏 ----------
 
     def _rhythm(self) -> dict:
-        """现在实际用的节奏：配置是起点，它写过的部分按它的来；每日上限始终是防封护栏。"""
-        cap = int(self.cfg.get("daily_max", 4))
+        """现在实际用的节奏：配置是起点，它写过的部分按它的来；设了每日上限的话始终不超过它。"""
+        cap = self._day_cap()
         r = {
-            "reach_out_per_day": cap,
+            "reach_out_per_day": cap or rhythm.UNCAPPED_START,
             "reach_out_hours": [],
             "greet_times": list(self.cfg.get("fixed_times") or []),
             "post_times": list(self.cfg.get("qzone_times") or []),
         }
         if self.cfg.get("rhythm_self", True):
             r.update(self.store["rhythm"])
-        r["reach_out_per_day"] = min(int(r["reach_out_per_day"]), cap)
+        if cap:
+            r["reach_out_per_day"] = min(int(r["reach_out_per_day"]), cap)
         return r
+
+    def _free_on(self) -> bool:
+        return bool(self.cfg.get("free_moments", True))
+
+    def _rhythm_shown(self) -> dict:
+        """给它（和 /fy 状态）看的节奏：开着空闲时刻时，「每天随口找几次 / 哪些时间段」不起作用，就不列。"""
+        r = self._rhythm()
+        if self._free_on():
+            r = {k: v for k, v in r.items() if k not in ("reach_out_per_day", "reach_out_hours")}
+        return r
+
+    def _rhythm_text(self) -> str:
+        text = rhythm.describe(self._rhythm_shown())
+        if self._free_on():
+            text += "\n另外，什么时候有一段自己的空闲时间，是你每次空闲时自己定的，不在这里。"
+        return text
+
+    def _rhythm_keys(self) -> str:
+        if self._free_on():
+            return RHYTHM_FIXED_KEYS
+        per_day = f"0 到 {self._day_cap()}" if self._day_cap() else "几次都行"
+        return RHYTHM_REACH_KEYS.format(per_day_range=per_day) + RHYTHM_FIXED_KEYS
 
     def _adopt_rhythm(self, raw):
         """反思时它写下的节奏：认得出来的部分就用上，写错的不替它猜。"""
         if not self.cfg.get("rhythm_self", True):
             return
-        new = rhythm.normalize(raw, int(self.cfg.get("daily_max", 4)))
+        new = rhythm.normalize(raw, self._day_cap())
         if not new:
             return
         merged = {**self.store["rhythm"], **new}
@@ -1063,6 +1446,7 @@ class Dafeiyu(Star):
         self.store["draw_count"] = 0
         self.store["fixed_done"] = []
         self.store["plans"] = plans.tidy(self.store["plans"], now.timestamp())  # 放了太久的清掉
+        self.store["wishes"] = wishes.told(self.store["wishes"], "", set(), now.timestamp())  # 满足了又放太久的移走
         self._plan_qzone(now)
 
     async def _tick(self):
@@ -1121,6 +1505,10 @@ class Dafeiyu(Star):
         if not (self._in_quiet(now) or over_budget):
             await self._plan_moment(now)
 
+        # 空闲时刻：什么时候有、有了做什么，都是它自己定的
+        if self._free_on():
+            await self._free_tick(now, over_budget)
+
         if not (self.cfg.get("proactive_enabled", True) and self.store["owner_umo"]):
             return
         if self._in_quiet(now) or over_budget:
@@ -1131,14 +1519,17 @@ class Dafeiyu(Star):
             t, _, kind = item.partition(" ")
             due = dt.datetime.combine(now.date(), _hm(t))
             late = (now - due).total_seconds() / 60
-            if 0 <= late <= FIXED_WINDOW_MINUTES and t not in self.store["fixed_done"]:
+            if 0 <= late <= FIXED_WINDOW_MINUTES and t not in self.store["fixed_done"] and not self._paused("message"):
                 self.store["fixed_done"].append(t)
                 self.store["last_proactive"] = ts
                 self.store.save()
                 await self.proactive(kind or "打个招呼")
                 return
 
-        if self.store["proactive_count"] >= r["reach_out_per_day"]:
+        # 开着空闲时刻时，随口找 TA 已经在空闲时刻里，时机由它自己定；下面按概率碰运气的这段就不跑了
+        if self._free_on():
+            return
+        if self.store["proactive_count"] >= r["reach_out_per_day"] or self._left("message") <= 0:
             return
         if not rhythm.in_windows(now.time(), r["reach_out_hours"]):
             return
@@ -1184,6 +1575,79 @@ class Dafeiyu(Star):
                 logger.error(f"[大肥鱼] 定时任务出错：{e}", exc_info=True)
             await asyncio.sleep(TICK_SECONDS)
 
+    # ---------- 看图：把图转成一段客观描述（见 vision.py） ----------
+
+    async def _see(self, src) -> str:
+        """看一张图（地址、本地路径或字节），返回客观描述。
+
+        关着、没有 Key、防循环保险停着、超了预算、或者看失败了，都返回空串：调用方照原来的样子处理，消息不丢。
+        """
+        if not self.cfg.get("vision_enabled", True) or self._paused("see") or self._over_budget():
+            return ""
+        key, base = self._draw_key()
+        if not key:
+            return ""
+        try:
+            data = src if isinstance(src, bytes) else await vision.fetch(str(src))
+            self._did("see")  # 请求发出去就算一次
+            desc, usage = await vision.describe(
+                data, key, base, self.cfg.get("vision_model", "") or vision.DEFAULT_MODEL
+            )
+        except Exception as e:
+            logger.warning(f"[大肥鱼] 看图失败，这张照原来的样子处理：{e}")
+            return ""
+        self._count_see_usage(usage)
+        return desc
+
+    def _chat_sees_images(self, event: AstrMessageEvent) -> bool:
+        """这个会话用的聊天模型自己收不收图。跟 AstrBot 一样：没配 modalities 就当收。"""
+        try:
+            provider = self.context.get_using_provider(umo=event.unified_msg_origin)
+            modalities = provider.provider_config.get("modalities", None) if provider else None
+        except Exception:
+            return True
+        return not modalities or "image" in modalities
+
+    def _drop_seen_images(self, event: AstrMessageEvent, req: ProviderRequest):
+        """这条消息里的图都已经转成了文字：聊天模型自己看不了图的话，就别再把原图塞给它。"""
+        seen, total = event.get_extra("dafeiyu_seen") or (0, 0)
+        if not req.image_urls or not total or seen < total or self._chat_sees_images(event):
+            return
+        req.image_urls = []
+
+    # ---------- 群里最近的消息（只在内存，见 groupctx.py） ----------
+
+    def _group_keep(self) -> tuple[int, float]:
+        """每个群留几条、往回留几小时。"""
+        lines = int(self.cfg.get("group_context_lines", 20) or 0)
+        return lines, float(self.cfg.get("group_context_hours", 3) or 0)
+
+    def _group_note(self, umo: str, entry: dict):
+        keep, hours = self._group_keep()
+        if keep <= 0:
+            return
+        self._group_lines[umo] = groupctx.record(self._group_lines.get(umo, []), entry, time.time(), keep, hours)
+        if len(self._group_lines) > 50:  # 群太多就只留最近有人说话的那些
+            last = lambda k: self._group_lines[k][-1]["t"] if self._group_lines[k] else 0
+            for k in sorted(self._group_lines, key=last)[:-50]:
+                del self._group_lines[k]
+
+    async def _group_block(self, event: AstrMessageEvent) -> str:
+        """在群里被叫到时：叫它之前群里在聊什么。之前没看过的图先补看几张。"""
+        keep, hours = self._group_keep()
+        umo = event.unified_msg_origin
+        lines = groupctx.trim(self._group_lines.get(umo, []), time.time(), keep, hours)
+        me = str(getattr(event.message_obj, "message_id", "") or "")
+        for x in groupctx.unseen_images([x for x in lines if x["id"] != me], SEE_GROUP_BACKLOG):
+            desc = await self._see(x["img"])
+            # 看不了也不再试：免得每次被叫到都重新看同一张
+            lines = [(groupctx.fill(y, desc) if desc else {**y, "img": ""}) if y is x else y for y in lines]
+        self._group_lines[umo] = lines
+        said = groupctx.fmt(lines, skip_id=me)
+        if not said:
+            return ""
+        return f"\n\n（群里最近的消息，只是背景，你可以接着聊，也可以不理：\n{said}）"
+
     # ---------- 钩子 ----------
 
     def _trim_guest_context(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -1204,23 +1668,40 @@ class Dafeiyu(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message(self, event: AstrMessageEvent):
-        """把它看不到的消息段（小黄脸、戳一戳、语音……）翻译成文字，免得被当成空消息跳过。"""
+        """把它看不到的消息段（小黄脸、戳一戳、语音、图片……）翻译成文字，免得被当成空消息跳过。
+
+        图片：私聊里、或者在群里叫到它时，用视觉模型看一眼，写成「[图片：……]」；看不了就照原来的样子（模型自己看）。
+        群消息不管叫没叫它，都在内存里记一份（见 groupctx.py），它在群里被叫到时能看到前面在聊什么。
+        """
         raw = getattr(event.message_obj, "raw_message", None)
         segments = raw.get("message") if isinstance(raw, dict) else None
         if not segments:
             return
-        for seg in segments:  # 记住刚收到的图（表情包），它想收藏时用得上
-            if not isinstance(seg, dict):
-                continue
-            data = seg.get("data") or {}
-            if seg.get("type") == "image" and data.get("url"):
-                who = "TA" if self._is_owner(event) else "别人"
-                self._recent_images[event.unified_msg_origin] = (time.time(), data["url"], who)
+        to_me = event.is_private_chat() or event.is_at_or_wake_command
+        images = [
+            (seg.get("data") or {}).get("url") or ""
+            for seg in segments if isinstance(seg, dict) and seg.get("type") == "image"
+        ]
+        descs = []
+        if to_me:
+            for url in images[:SEE_PER_MESSAGE]:
+                descs.append(await self._see(url) if url else "")
+            event.set_extra("dafeiyu_seen", (sum(1 for d in descs if d), len(images)))
+        if images and images[-1]:  # 记住刚收到的图（表情包），它想收藏时用得上
+            who = "TA" if self._is_owner(event) else "别人"
+            last = descs[len(images) - 1] if len(descs) == len(images) else ""
+            self._recent_images[event.unified_msg_origin] = (time.time(), images[-1], who, last)
         stt = bool((self.context.get_config().get("provider_stt_settings") or {}).get("enable"))
-        extra = describe_message(segments, stt)
+        extra = describe_message(segments, stt) + "".join(vision.tag(d) for d in descs if d)
         if extra:
             event.message_str = f"{event.message_str} {extra}".strip()
             event.message_obj.message_str = event.message_str
+        if not event.is_private_chat() and not self._is_cron(event):
+            text, img, ph = groupctx.text_of(segments, descs, str(event.get_self_id()), stt)
+            if text and not text.startswith("/"):  # 指令不算聊天
+                who = "TA" if self._is_owner(event) else (event.get_sender_name() or str(event.get_sender_id()))
+                msg_id = getattr(event.message_obj, "message_id", "")
+                self._group_note(event.unified_msg_origin, groupctx.entry(time.time(), msg_id, who, text, img, ph))
 
     async def _pending_jobs(self, umo: str) -> str:
         """它在这个会话里给自己定下、还没到时间的事——让它知道自己答应过什么。"""
@@ -1248,11 +1729,13 @@ class Dafeiyu(Star):
         # 它对自己的认识每晚都可能变，所以每次请求现拼
         req.system_prompt = (req.system_prompt or "") + self._self_block()
         req.system_prompt += await self._pending_jobs(event.unified_msg_origin)
+        self._drop_seen_images(event, req)
         if self._is_cron(event):
             # 自己定的事到点了：不是谁发来的消息，不记进对话流水
             if self._is_owner(event) and event.is_private_chat():
                 req.system_prompt += (
                     self._bond_block() + self._thoughts_block() + self._mood_block() + self._plans_block()
+                    + self._wishes_block()
                 )
             return
         if not (self._is_owner(event) and event.is_private_chat()):
@@ -1260,6 +1743,8 @@ class Dafeiyu(Star):
             who = event.get_sender_name() or str(event.get_sender_id())
             where = "群里" if not event.is_private_chat() else "私聊里"
             self._trim_guest_context(event, req)
+            if not event.is_private_chat():
+                req.system_prompt += await self._group_block(event)
             if self._is_owner(event):
                 req.system_prompt += "\n\n（TA 现在在群里和你说话，旁边还有别人。你们之间的私事不在这里说。）"
             else:
@@ -1271,6 +1756,7 @@ class Dafeiyu(Star):
             return
         req.system_prompt += (
             self._bond_block() + self._thoughts_block() + self._mood_block() + self._plans_block()
+            + self._wishes_block()
         )
         req.system_prompt += (
             "\n\n## 我能做的事\n"
@@ -1278,6 +1764,8 @@ class Dafeiyu(Star):
             "- 想记下此刻的心情，可以用 note_feeling，只有我自己看得到，过一阵会淡去。想记才记。\n"
             "- 想给自己记一件事，可以用 plan_for_me（可以定个时间，也可以不定），只有我自己看得到；"
             "定了时间的，到时候我会想起它。划掉用 drop_plan。\n"
+            "- 想把希望有的东西写下来，可以用 wish_for 写进我的心愿单；心愿单是写给 TA 看的，TA 能看到上面的每一条。"
+            "不想要了用 drop_wish 划掉。写不写、写什么由我决定。\n"
             "- 想用语音说话，可以用 send_voice（声音由我自己用 choose_my_voice 挑）。\n"
             "- 想画图，可以用 draw，画好的图存进我自己的收藏，之后能用 send_sticker 发、也能配进说说。画不画、画什么由我决定。\n"
             "- 看到喜欢的图或表情包，可以用 keep_sticker 存进自己的收藏；想发的时候用 send_sticker 挑一张。"
@@ -1288,7 +1776,7 @@ class Dafeiyu(Star):
             logger.info(f"[大肥鱼] 已记住 owner 的私聊会话：{event.unified_msg_origin}")
         self.store["owner_last_msg"] = time.time()
         self.store.save()
-        self.growth.log("TA", event.message_str)
+        self.growth.log("TA", event.message_str or ("[图片]" if req.image_urls else ""))
         recent = [m for m in self.store["recent_proactive"] if time.time() - m["t"] < 6 * 3600]
         if recent:
             said = "\n".join(
@@ -1301,6 +1789,9 @@ class Dafeiyu(Star):
         # 只有和 TA 的私聊会成为成长的原料
         if self._is_owner(event) and event.is_private_chat() and not self._is_cron(event):
             self.growth.log("我", resp.completion_text or "")
+        # 群里自己说的话也记进那个群最近的消息（只在内存），下次被叫到时前后接得上
+        if not event.is_private_chat() and not self._is_cron(event) and (resp.completion_text or "").strip():
+            self._group_note(event.unified_msg_origin, groupctx.entry(time.time(), "", "你", resp.completion_text))
 
     # ---------- 工具：它自己想用的时候用 ----------
 
@@ -1384,6 +1875,47 @@ class Dafeiyu(Star):
         self.growth.log("我（划掉了自己记的事）", gone["what"])
         return f"划掉了：{gone['what']}"
 
+    @filter.llm_tool(name="wish_for")
+    async def wish_for(self, event: AstrMessageEvent, text: str):
+        """往你的心愿单上写一条你希望有的东西。心愿单和日记、小本子不同，是写给 TA 看的：TA 能看到上面的每一条，TA 觉得已经满足了的会告诉你。写不写、写什么由你决定。
+
+        Args:
+            text(string): 用你自己的话写，一两句
+        """
+        if not self._own_moment(event):
+            return "这是我自己的事，不在这里写。"
+        text = str(text or "").strip()[:200]
+        if not text:
+            return "没写内容，没记。"
+        if self._paused("wish"):
+            return f"没写：{self._why_not('wish')}。"
+        if len(wishes.open_ones(self.store["wishes"])) >= wishes.MAX_WISHES:
+            full = f"心愿单写满了（最多 {wishes.MAX_WISHES} 条）。想再写，先用 drop_wish 划掉几条。"
+            return full + (f"\n{wishes.listing(self.store['wishes'])}" if event.is_private_chat() else "")
+        w = self._note_wish(text)
+        self._did("wish")
+        return f"写进心愿单了（编号 {w['id']}），TA 能看到。"
+
+    @filter.llm_tool(name="drop_wish")
+    async def drop_wish(self, event: AstrMessageEvent, wish_id: str):
+        """把你心愿单上的某一条划掉。
+
+        Args:
+            wish_id(string): 那一条的编号
+        """
+        if not self._own_moment(event):
+            return "这是我自己的事，不在这里改。"
+        if self._paused("wish"):
+            return f"没划：{self._why_not('wish')}。"
+        gone = self._drop_wish(wish_id)
+        if gone is None:
+            if not event.is_private_chat():  # 群里不列内容
+                return f"心愿单上没有编号 {wish_id}。"
+            listed = wishes.listing(self.store["wishes"])
+            return f"心愿单上没有编号 {wish_id}。" + (f"现在写着的：\n{listed}" if listed else "心愿单现在是空的。")
+        self._did("wish")
+        return f"划掉了：{gone['text']}"
+
     @filter.llm_tool(name="choose_my_voice")
     async def choose_my_voice(self, event: AstrMessageEvent, voice_name: str):
         """给自己挑一个说话的声音（发语音时用）。只在你自己想挑、想换的时候用。可选的声音（说明是微软的标注）：
@@ -1428,8 +1960,8 @@ class Dafeiyu(Star):
             if self._is_owner(event) and event.is_private_chat():
                 return f"你还没给自己挑过声音。想发语音的话，先用 choose_my_voice 挑一个：\n{voice.listing()}"
             return "我还没有自己的声音，这次先打字吧。"
-        if self.store["voice_count"] >= int(self.cfg.get("voice_daily_max", 20)):
-            return "今天语音发得够多了（防封护栏），先打字吧。"
+        if self._left("voice") <= 0:
+            return f"{self._why_not('voice')}，先打字吧。"
         try:
             path = await voice.synthesize(text, self.store["voice"], data_dir() / "voice_tmp")
             await event.send(MessageChain(chain=[Record.fromFileSystem(str(path))]))
@@ -1437,7 +1969,7 @@ class Dafeiyu(Star):
             logger.warning(f"[大肥鱼] 发语音失败：{e}")
             return f"语音没发出去（{e}），这次先打字吧。"
         self.store["voice_count"] += 1
-        self.store.save()
+        self._did("voice")
         if self._is_owner(event) and event.is_private_chat() and not self._is_cron(event):
             self.growth.log("我（发了语音）", text)
         return "语音发出去了。"
@@ -1465,7 +1997,7 @@ class Dafeiyu(Star):
             return f"图片没下载下来（{e}），这次没存上。"
         if not data or len(data) > 5 * 1024 * 1024:
             return "这张图太大了（或是空的），没存。"
-        new, _ = self.stickers.keep(data, note, recent[2])
+        new, _ = self.stickers.keep(data, note, recent[2], recent[3])
         return "存好了。" if new else "这张之前就存过，描述更新了。"
 
     @filter.llm_tool(name="send_sticker")
@@ -1490,7 +2022,7 @@ class Dafeiyu(Star):
         return f"发了：{item['note']}"
 
     def _draw_key(self) -> tuple[str, str]:
-        """画图用的 Key：插件配置里填了就用它，否则用 AstrBot 里已经配好的硅基流动那一项（一个 Key 多用）。"""
+        """画图、看图用的 Key：插件配置里填了就用它，否则用 AstrBot 里已经配好的硅基流动那一项（一个 Key 多用）。"""
         own = str(self.cfg.get("draw_api_key", "") or "").strip()
         if own:
             return own, draw.DEFAULT_BASE
@@ -1500,9 +2032,33 @@ class Dafeiyu(Star):
             logger.debug(f"[大肥鱼] 读取提供商配置失败：{e}")
             return "", ""
 
+    async def _make_picture(self, prompt: str, note: str) -> tuple[str, str]:
+        """画一张存进收藏 → (文件名, 实际画出来的样子)。draw 工具和空闲时刻共用。
+
+        画不了（上限、预算、没有 Key、接口出错）抛 DrawRefused，里面是给它看的原因。
+        """
+        if self._left("draw") <= 0:
+            raise DrawRefused(f"{self._why_not('draw')}，这次先不画了")
+        if self._over_budget():
+            raise DrawRefused("今天的花销到了预算，先不画了")
+        key, base = self._draw_key()
+        if not key:
+            raise DrawRefused("现在画不了：还没有能用的生图接口（需要硅基流动的 Key）")
+        # 请求发出去就算一次：失败也可能已经扣了费
+        self.store["draw_count"] += 1
+        self._did("draw")
+        try:
+            data = await draw.generate(prompt, key, base, self.cfg.get("draw_model", "") or draw.DEFAULT_MODEL)
+        except Exception as e:
+            logger.warning(f"[大肥鱼] 画图失败：{e}")
+            raise DrawRefused(f"没画出来（{e}）") from e
+        seen = await self._see(data)  # 看一眼实际画成了什么样；看不了就只有自己写的备注
+        _, name = self.stickers.keep(data, note, "我画的", seen)
+        return name, seen
+
     @filter.llm_tool(name="draw")
     async def draw_picture(self, event: AstrMessageEvent, prompt: str, note: str, send: bool = False):
-        """画一张图。画好的图存进你自己的收藏（和表情包在一起），会告诉你它的编号：之后可以用 send_sticker 发出去，也可以配进说说。画不画、画什么由你决定。每天能画的张数有上限（防封和花销护栏）。
+        """画一张图。画好的图存进你自己的收藏（和表情包在一起），会告诉你它的编号和实际画出来的样子：之后可以用 send_sticker 发出去，也可以配进说说。画不画、画什么由你决定。设了每天上限的话，超了就画不了。
 
         Args:
             prompt(string): 要画的画面，用你自己的话描述
@@ -1515,34 +2071,23 @@ class Dafeiyu(Star):
             return "没有要画的内容。"
         if not note:
             return "给这张图写句描述或备注再画吧，不然以后在收藏里找不到。"
-        if self.store["draw_count"] >= int(self.cfg.get("draw_daily_max", 5)):
-            return "今天画得够多了（防封和花销护栏），明天再画吧。"
-        if self._over_budget():
-            return "今天的花销到了预算，先不画了。"
-        key, base = self._draw_key()
-        if not key:
-            return "现在画不了：还没有能用的生图接口（需要硅基流动的 Key）。"
-        # 请求发出去就算一次：失败也可能已经扣了费
-        self.store["draw_count"] += 1
-        self.store.save()
         try:
-            data = await draw.generate(prompt, key, base, self.cfg.get("draw_model", "") or draw.DEFAULT_MODEL)
-        except Exception as e:
-            logger.warning(f"[大肥鱼] 画图失败：{e}")
-            return f"没画出来（{e}）。"
-        _, name = self.stickers.keep(data, note, "我画的")
+            name, seen = await self._make_picture(prompt, note)
+        except DrawRefused as e:
+            return f"{e}。"
         n = self.stickers.number(name)
         with_ta = self._is_owner(event) and event.is_private_chat() and not self._is_cron(event)
         if with_ta:
-            self.growth.log("我（画了一张图）", note)
+            self.growth.log("我（画了一张图）", note + (f"\n（画出来的样子：{seen}）" if seen else ""))
         done = f"画好了，存进了收藏，编号 {n}：{note}"
+        looks = f"\n实际画出来的样子：{seen}" if seen else ""
         if send:
             try:
                 await event.send(MessageChain().file_image(str(self.stickers.dir / name)))
             except Exception as e:
-                return f"{done}。不过没发出去：{e}"
-            return f"{done}。已经发出去了。"
-        return done + "。"
+                return f"{done}。不过没发出去：{e}{looks}"
+            return f"{done}。已经发出去了。{looks}"
+        return f"{done}。{looks}"
 
     # ---------- 指令（仅 owner 可用） ----------
 
@@ -1558,21 +2103,52 @@ class Dafeiyu(Star):
         s = self.store
         yield event.plain_result(
             f"你的私聊会话：{s['owner_umo'] or '未记录（先私聊我一句）'}\n"
-            f"今天主动私聊：{s['proactive_count']}/{self._rhythm()['reach_out_per_day']}\n"
-            f"它现在的节奏{'（它自己定的）' if s['rhythm'] and self.cfg.get('rhythm_self', True) else '（配置里的初始值）'}：\n"
-            f"{rhythm.describe(self._rhythm())}\n"
+            + (
+                f"今天主动私聊：{self._quota(s['proactive_count'], self._day_cap())}（什么时候找你，它在空闲时刻里自己定）\n"
+                + (f"下次空闲时刻：{dt.datetime.fromtimestamp(s['next_free']):%H:%M}\n" if s["next_free"] else "下次空闲时刻：还没排（启动后几分钟内排上）\n")
+                if self._free_on() else
+                f"今天主动私聊：{s['proactive_count']}/{self._rhythm()['reach_out_per_day']}（它自己定的）"
+                + ("" if self._day_cap() else "，不设上限") + "\n"
+            )
+            + f"它现在的节奏{'（它自己定的）' if s['rhythm'] and self.cfg.get('rhythm_self', True) else '（配置里的初始值）'}：\n"
+            f"{rhythm.describe(self._rhythm_shown())}\n"
             f"今天说说时间点（含偏移分钟）：{s['qzone_slots']}，已处理 {s['qzone_done']}\n"
-            f"今天它发了 {s['qzone_count']}/{self.cfg.get('qzone_daily_max', 2)} 条说说\n"
-            f"今天它画了 {s['draw_count']}/{self.cfg.get('draw_daily_max', 5)} 张图\n"
+            f"今天它发了 {self._quota(s['qzone_count'], self._cap('post'))} 条说说\n"
+            f"今天它画了 {self._quota(s['draw_count'], self._cap('draw'))} 张图\n"
+            f"今天它发了 {self._quota(s['voice_count'], self._cap('voice'))} 条语音\n"
+            f"看图：{(self.cfg.get('vision_model') or vision.DEFAULT_MODEL) if self.cfg.get('vision_enabled', True) else '关着'}\n"
             f"待审核草稿：{', '.join(s['drafts']) or '无'}\n"
-            f"今天在空间评论了 {s['qzone_comment_count']}/{self.cfg.get('qzone_comment_daily_max', 3)} 条\n"
+            f"今天在空间评论了 {self._quota(s['qzone_comment_count'], self._cap('comment'))} 条\n"
             f"它给自己记下的事：{len(s['plans'])} 件（内容是它自己的，不显示）\n"
+            f"它的心愿单：{len(wishes.open_ones(s['wishes']))} 条（/fy 心愿 看）\n"
             f"免打扰：{self.cfg.get('quiet_hours') or '无'}，现在{'是' if self._in_quiet(dt.datetime.now()) else '不是'}免打扰时段\n"
             f"上次反思：{s['reflected_day'] or '还没有'}\n"
             f"今天大约花了 {self.spent_today():.2f} 元"
             + (f"（预算 {self.cfg.get('daily_budget')} 元）" if float(self.cfg.get("daily_budget", 0) or 0) > 0 else "")
             + (f"\n最近一次发送失败：{s['send_error']}" if s["send_error"] else "")
+            + "".join(
+                f"\n防循环保险：{k} 停到 {dt.datetime.fromtimestamp(t):%H:%M}"
+                for k, t in s["burst_pause"].items() if t > time.time()
+            )
         )
+
+    @fy.command("心愿")
+    async def cmd_wishes(self, event: AstrMessageEvent, action: str = ""):
+        """/fy 心愿 看它的心愿单；/fy 心愿 完成 <编号> [一句话] 告诉它这件已经有了。"""
+        if not self._is_owner(event):
+            event.stop_event()
+            return
+        act, wid, note = wishes.parse_cmd(event.get_message_str())  # 那一句话里可能有空格，自己拆
+        if act != "完成":
+            yield event.plain_result(wishes.for_owner(self.store["wishes"]))
+            return
+        self.store["wishes"], w = wishes.mark_done(self.store["wishes"], wid, note, time.time())
+        if w is None:
+            yield event.plain_result(f"心愿单上没有还没满足的编号 {wid or '（没写编号）'}。用 /fy 心愿 看看。")
+            return
+        self.store.save()
+        self.growth.log("TA（说我心愿单上的这件已经有了）", wishes.granted_text(w))
+        yield event.plain_result(f"好，它下次和你私聊、还有夜里回想的时候会知道：{wishes.granted_text(w)}")
 
     @fy.command("看空间")
     async def cmd_qzone_look(self, event: AstrMessageEvent):
@@ -1601,6 +2177,25 @@ class Dafeiyu(Star):
         self.store["owner_umo"] = event.unified_msg_origin
         await self.proactive("测试一下主动找 TA 聊天")
         # 有意不 stop_event：「戳」本身还会交给模型当普通聊天再回一句，更有活人感
+
+    @fy.command("空闲")
+    async def cmd_free(self, event: AstrMessageEvent):
+        """立刻给它一段空闲时刻（测试用）。只回做了几件事，不回内容。"""
+        if not self._is_owner(event):
+            event.stop_event()
+            return
+        if self._paused("free"):
+            yield event.plain_result("空闲时刻的防循环保险停着，等一会儿再试。")
+            return
+        try:
+            did = await self._free_moment(dt.datetime.now())
+        except Exception as e:
+            logger.error(f"[大肥鱼] 空闲时刻出错：{e}", exc_info=True)
+            yield event.plain_result(f"出错了：{e}")
+            return
+        yield event.plain_result(
+            f"它这次做了 {len(did)} 件事；下次空闲时刻：{dt.datetime.fromtimestamp(self.store['next_free']):%H:%M}"
+        )
 
     @fy.command("反思")
     async def cmd_reflect(self, event: AstrMessageEvent):

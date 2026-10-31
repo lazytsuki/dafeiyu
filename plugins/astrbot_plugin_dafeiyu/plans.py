@@ -10,7 +10,7 @@
 import datetime as dt
 import re
 
-MAX_PLANS = 20  # 本子上最多记这么多条；满了要先划掉几条才能再记（不替它丢）
+MAX_PLANS = 100  # 不是限制，是防出错刷满的保险；满了要先划掉几条才能再记（不替它丢）
 STALE_DAYS = 30  # 定的时间过了这么久、或者没定时间又放了这么久，就自动清掉
 FORMATS = "「YYYY-MM-DD HH:MM」「MM-DD HH:MM」「HH:MM」「明天 HH:MM」"
 

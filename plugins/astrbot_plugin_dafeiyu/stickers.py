@@ -1,7 +1,8 @@
 """它自己的表情包收藏：看到喜欢的就存下来，配一句自己写的描述；想用的时候按意思挑出来。
 
 收藏什么、怎么描述、什么时候发，都是它自己的事。这里只管存和找。
-  stickers/index.json   [{"file": "ab12….gif", "note": "它写的描述", "from": "TA"/"别人"/"我画的", "t": ts}]
+  stickers/index.json   [{"file": "ab12….gif", "note": "它写的描述", "from": "TA"/"别人"/"我画的", "t": ts,
+                          "seen": 看图模型给的客观描述（看过才有）}]
   stickers/<md5>.<ext>  图片本身
 """
 
@@ -42,17 +43,19 @@ class Stickers:
     def _save(self, items: list[dict]):
         self.index_path.write_text(json.dumps(items, ensure_ascii=False, indent=1), "utf-8")
 
-    def keep(self, data: bytes, note: str, source: str) -> tuple[bool, str]:
-        """存一张。返回 (是不是新的, 文件名)。同一张图再存一次就只更新描述。"""
+    def keep(self, data: bytes, note: str, source: str, seen: str = "") -> tuple[bool, str]:
+        """存一张。返回 (是不是新的, 文件名)。同一张图再存一次就只更新描述。seen 是看图看出来的客观描述，可以没有。"""
         name = f"{hashlib.md5(data).hexdigest()}.{_ext(data)}"
         items = self.all()
         for it in items:
             if it["file"] == name:
                 it["note"] = note
+                if seen:
+                    it["seen"] = seen
                 self._save(items)
                 return False, name
         (self.dir / name).write_bytes(data)
-        items.append({"file": name, "note": note, "from": source, "t": time.time()})
+        items.append({"file": name, "note": note, "from": source, "t": time.time(), **({"seen": seen} if seen else {})})
         if len(items) > MAX_STICKERS:  # 太多了就把最早存的挪出去
             for old in items[: len(items) - MAX_STICKERS]:
                 (self.dir / old["file"]).unlink(missing_ok=True)
