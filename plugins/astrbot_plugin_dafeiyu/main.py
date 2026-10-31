@@ -20,7 +20,7 @@ from .growth import Growth
 from .qzone import QzoneClient, QzoneError
 from astrbot.api.message_components import Record
 
-from . import draw, freetime, groupctx, guard, plans, rhythm, vision, voice, wishes
+from . import days, draw, forwards, freetime, groupctx, guard, links, plans, rhythm, vision, voice, wishes, works
 from .recall import search as recall_search
 from .senses import describe_message, plain_text
 from .outbox import split_out, take_pic
@@ -36,6 +36,7 @@ SETTLE_SECONDS = 120  # 刚连上先等一会儿：NapCat 可能把离线消息�
 MOOD_HOURS = 12  # 记下的心情过了这么久就不再想起
 SEE_PER_MESSAGE = 3  # 一条消息里最多看几张图
 SEE_GROUP_BACKLOG = 2  # 在群里被叫到时，最多补看几张之前没看过的图
+LINKS_PER_MESSAGE = 2  # 一条消息里最多打开几个链接
 WANDER_PLUGIN = "astrbot_plugin_xiaodong_wander"  # 逛 B 站 / 微博的插件（另装的，没装就不提这件事）
 
 REFLECT_PROMPT = """现在是深夜，你一个人安静下来，回想今天。
@@ -193,6 +194,9 @@ class Dafeiyu(Star):
         self._recent_images: dict[str, tuple[float, str, str, str]] = {}  # 会话 → (时间, 图片地址, 谁发的, 看出来的描述)
         self._group_lines: dict[str, list[dict]] = {}  # 群会话 → 最近的消息（只在内存，见 groupctx.py）
         self._bot_uin = ""
+        self._weather: tuple[float, str] = (0.0, "")  # (查到的时间, 一句天气)，只在内存
+        self._weather_tried = 0.0
+        self._coords: dict[str, tuple[float, float] | None] = {}  # 地名 → 查到的经纬度
         self._task = asyncio.create_task(self._loop())
 
     async def terminate(self):
@@ -345,6 +349,46 @@ class Dafeiyu(Star):
         granted, _ = self._granted_lines("reflect")
         out = f"\n你的心愿单上写着的（TA 能看到）：\n<<<\n{listed}\n>>>\n" if listed else ""
         return out + (f"\n心愿单上的事：\n{granted}\n" if granted else "")
+
+    def _day_block(self) -> str:
+        """今天是什么日子、外面天气怎么样（见 days.py）。只是告诉它，提不提由它。"""
+        if not self.cfg.get("days_enabled", True):
+            return ""
+        now = dt.datetime.now()
+        try:
+            line = days.calendar_line(now)
+        except Exception as e:
+            logger.debug(f"[大肥鱼] 日历没算出来：{e}")
+            line = f"{now.month}月{now.day}日 周{'一二三四五六日'[now.weekday()]}"
+        t, weather = self._weather
+        if weather and time.time() - t < 3 * days.WEATHER_TTL:  # 太久没查到新的就不说，免得说的是前天的天气
+            line += f"。{weather}"
+        return f"\n\n（今天：{line}。）"
+
+    async def _refresh_weather(self):
+        """每小时查一次天气，存在内存里。没填地方、查不到都不报错，只是不说天气。"""
+        place = (self.cfg.get("weather_place") or "").strip()
+        if not (self.cfg.get("days_enabled", True) and place):
+            self._weather = (0.0, "")
+            return
+        now = time.time()
+        if now - self._weather_tried < days.WEATHER_TTL:
+            return
+        self._weather_tried = now
+        try:
+            coords = days.parse_coords(self.cfg.get("weather_coords") or "")
+            if coords is None:
+                if self._coords.get(place) is None:
+                    self._coords[place] = await days.geocode(place)
+                coords = self._coords[place]
+            if coords is None:
+                logger.info(f"[大肥鱼] 查不到「{place}」在哪，天气先不说；可以在配置里填经纬度")
+                return
+            line = days.weather_line(place, await days.fetch_weather(*coords))
+            if line:
+                self._weather = (now, line)
+        except Exception as e:
+            logger.info(f"[大肥鱼] 天气没查到：{e}")
 
     def _system(self) -> str:
         """和 TA 私聊时的完整自己。"""
@@ -612,7 +656,7 @@ class Dafeiyu(Star):
         )
         text = self._clean(
             await self._llm(
-                prompt, self._system() + self._thoughts_block() + self._mood_block() + self._plans_block()
+                prompt, self._system() + self._thoughts_block() + self._mood_block() + self._plans_block() + self._day_block()
             )
         )
         if text and text.upper() != "SKIP":
@@ -654,7 +698,7 @@ class Dafeiyu(Star):
             + ("如果此刻并不想发，就只输出 SKIP。" if optional else "")
         )
         # 说说是公开的：只用对外的自己，不带「我和 TA 之间」；心事要不要写进去由它决定
-        text = self._clean(await self._llm(prompt, self._public_system() + self._thoughts_block()))
+        text = self._clean(await self._llm(prompt, self._public_system() + self._thoughts_block() + self._day_block()))
         if text.upper() == "SKIP":
             return "", None
         text, ref = take_pic(text)
@@ -766,7 +810,7 @@ class Dafeiyu(Star):
         )
         # 小本子只给它自己看；空间里写什么，上面的提示已经说了别人都看得到
         out = _parse_json(
-            await self._llm(prompt, self._public_system() + self._mood_block() + self._plans_block())
+            await self._llm(prompt, self._public_system() + self._mood_block() + self._plans_block() + self._day_block())
         )
         for c in out.get("comments") or []:
             if self._left("comment") <= 0:
@@ -982,7 +1026,7 @@ class Dafeiyu(Star):
         )
         text = self._clean(
             await self._llm(
-                prompt, self._system() + self._thoughts_block() + self._mood_block() + self._plans_block()
+                prompt, self._system() + self._thoughts_block() + self._mood_block() + self._plans_block() + self._day_block()
             )
         )
         self.store["owner_last_msg"] = max(self.store["owner_last_msg"], texts[-1][0])
@@ -1111,7 +1155,7 @@ class Dafeiyu(Star):
         )
         out = _parse_json(
             await self._llm(
-                prompt, self._system() + self._thoughts_block() + self._mood_block() + self._plans_block()
+                prompt, self._system() + self._thoughts_block() + self._mood_block() + self._plans_block() + self._day_block()
             )
         )
 
@@ -1282,7 +1326,7 @@ class Dafeiyu(Star):
         )
         out = _parse_json(
             await self._llm(
-                prompt, self._system() + self._thoughts_block() + self._mood_block() + self._plans_block()
+                prompt, self._system() + self._thoughts_block() + self._mood_block() + self._plans_block() + self._day_block()
             )
         )
         self.store["next_free"] = ts + freetime.next_gap(out.get("next"), now)
@@ -1452,6 +1496,7 @@ class Dafeiyu(Star):
     async def _tick(self):
         now = dt.datetime.now()
         self._new_day(now)
+        await self._refresh_weather()
         ts = time.time()
 
         # 每晚反思前一天；关机错过了几天，就按顺序一天天补（没对话的那天自然跳过）
@@ -1693,6 +1738,8 @@ class Dafeiyu(Star):
             self._recent_images[event.unified_msg_origin] = (time.time(), images[-1], who, last)
         stt = bool((self.context.get_config().get("provider_stt_settings") or {}).get("enable"))
         extra = describe_message(segments, stt) + "".join(vision.tag(d) for d in descs if d)
+        if to_me and self.cfg.get("links_enabled", True):
+            extra += await self._open_contents(event, segments)
         if extra:
             event.message_str = f"{event.message_str} {extra}".strip()
             event.message_obj.message_str = event.message_str
@@ -1702,6 +1749,49 @@ class Dafeiyu(Star):
                 who = "TA" if self._is_owner(event) else (event.get_sender_name() or str(event.get_sender_id()))
                 msg_id = getattr(event.message_obj, "message_id", "")
                 self._group_note(event.unified_msg_origin, groupctx.entry(time.time(), msg_id, who, text, img, ph))
+
+    async def _open_contents(self, event: AstrMessageEvent, segments: list) -> str:
+        """发给它的链接、分享卡片、转发的聊天记录、文本文件：打开看看里面是什么，写成文字接在后面。
+
+        看不了的只留 senses.py 写的那一句（发来了什么）。每样都单独兜住，一样出错不影响别的。
+        """
+        out = ""
+        urls = []
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            data = seg.get("data") or {}
+            if seg.get("type") == "text":
+                urls += links.find_urls(data.get("text", ""))
+            elif seg.get("type") == "json":
+                url = links.parse_card(data.get("data")).get("url", "")
+                if url:
+                    urls.append(url)
+            elif seg.get("type") == "forward" and not self._paused("link"):
+                try:
+                    self._did("link")
+                    out += forwards.forward_text(await forwards.fetch_forward(self._onebot, data))
+                except Exception as e:
+                    logger.info(f"[大肥鱼] 转发的聊天记录没读出来：{e}")
+        for url in list(dict.fromkeys(urls))[:LINKS_PER_MESSAGE]:
+            if self._paused("link"):
+                break
+            self._did("link")
+            try:
+                out += links.tag(url, await links.summarize(url))
+            except Exception as e:
+                logger.info(f"[大肥鱼] 链接没打开：{url}：{e}")
+                out += links.tag(url, "")
+        for comp in event.message_obj.message:
+            name, url = getattr(comp, "name", "") or "", getattr(comp, "url", "") or ""
+            if type(comp).__name__ != "File" or not forwards.is_text_file(name) or self._paused("link"):
+                continue
+            self._did("link")
+            try:
+                out += await forwards.read_text_file(url, name)
+            except Exception as e:
+                logger.info(f"[大肥鱼] 文件没读出来：{name}：{e}")
+        return out
 
     async def _pending_jobs(self, umo: str) -> str:
         """它在这个会话里给自己定下、还没到时间的事——让它知道自己答应过什么。"""
@@ -1735,7 +1825,7 @@ class Dafeiyu(Star):
             if self._is_owner(event) and event.is_private_chat():
                 req.system_prompt += (
                     self._bond_block() + self._thoughts_block() + self._mood_block() + self._plans_block()
-                    + self._wishes_block()
+                    + self._wishes_block() + self._day_block()
                 )
             return
         if not (self._is_owner(event) and event.is_private_chat()):
@@ -1756,7 +1846,7 @@ class Dafeiyu(Star):
             return
         req.system_prompt += (
             self._bond_block() + self._thoughts_block() + self._mood_block() + self._plans_block()
-            + self._wishes_block()
+            + self._wishes_block() + self._day_block()
         )
         req.system_prompt += (
             "\n\n## 我能做的事\n"
@@ -1766,6 +1856,7 @@ class Dafeiyu(Star):
             "定了时间的，到时候我会想起它。划掉用 drop_plan。\n"
             "- 想把希望有的东西写下来，可以用 wish_for 写进我的心愿单；心愿单是写给 TA 看的，TA 能看到上面的每一条。"
             "不想要了用 drop_wish 划掉。写不写、写什么由我决定。\n"
+            "- 想回头看看自己做过的东西（说说、画、签名……），可以用 look_at_my_works。\n"
             "- 想用语音说话，可以用 send_voice（声音由我自己用 choose_my_voice 挑）。\n"
             "- 想画图，可以用 draw，画好的图存进我自己的收藏，之后能用 send_sticker 发、也能配进说说。画不画、画什么由我决定。\n"
             "- 看到喜欢的图或表情包，可以用 keep_sticker 存进自己的收藏；想发的时候用 send_sticker 挑一张。"
@@ -1915,6 +2006,23 @@ class Dafeiyu(Star):
             return f"心愿单上没有编号 {wish_id}。" + (f"现在写着的：\n{listed}" if listed else "心愿单现在是空的。")
         self._did("wish")
         return f"划掉了：{gone['text']}"
+
+    @filter.llm_tool(name="look_at_my_works")
+    async def look_at_my_works(self, event: AstrMessageEvent, query: str = ""):
+        """翻一翻你自己做过的东西：发过的说说、画过的图、换过的签名、在空间和微博上留下的话，带日期。想回头看看自己做过什么的时候用。
+
+        Args:
+            query(string): 想找哪方面的，用几个词说；不填就是最近的那些
+        """
+        own = self._own_moment(event)
+        found = works.from_log(self.growth.log_dir)
+        if own:  # 画的图在自己的收藏里，可能画的是和 TA 有关的事：只在自己的时刻翻
+            found += works.drawings(self.stickers.all())
+        hits = works.pick(found, str(query or ""), public_only=not own)
+        if not hits:
+            return "没找到。" if query else "还没有做过的东西可翻。"
+        tip = "\n（画的图想再发出来，可以用 send_sticker 加收藏编号。）" if own and any("n" in w for w in hits) else ""
+        return works.fmt(hits) + tip
 
     @filter.llm_tool(name="choose_my_voice")
     async def choose_my_voice(self, event: AstrMessageEvent, voice_name: str):
@@ -2117,6 +2225,10 @@ class Dafeiyu(Star):
             f"今天它画了 {self._quota(s['draw_count'], self._cap('draw'))} 张图\n"
             f"今天它发了 {self._quota(s['voice_count'], self._cap('voice'))} 条语音\n"
             f"看图：{(self.cfg.get('vision_model') or vision.DEFAULT_MODEL) if self.cfg.get('vision_enabled', True) else '关着'}\n"
+            f"打开链接：{'开着' if self.cfg.get('links_enabled', True) else '关着'}\n"
+            f"它看到的今天：{self._day_block().strip().strip('（）') or '关着'}"
+            + ("" if self._weather[1] or not (self.cfg.get("weather_place") or "").strip() else "（天气还没查到）")
+            + "\n"
             f"待审核草稿：{', '.join(s['drafts']) or '无'}\n"
             f"今天在空间评论了 {self._quota(s['qzone_comment_count'], self._cap('comment'))} 条\n"
             f"它给自己记下的事：{len(s['plans'])} 件（内容是它自己的，不显示）\n"

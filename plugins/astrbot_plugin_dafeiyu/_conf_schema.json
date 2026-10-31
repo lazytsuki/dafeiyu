@@ -185,6 +185,30 @@
     "default": "Qwen/Qwen3-VL-8B-Instruct",
     "hint": "硅基流动的视觉模型名（OpenAI 兼容 chat/completions + image_url）"
   },
+  "links_enabled": {
+    "description": "打开链接：发给它的网址、分享卡片、转发的聊天记录、文本文件，先看一眼里面是什么",
+    "type": "bool",
+    "default": true,
+    "hint": "私聊里、或在群里叫到它时：网址和分享卡片读标题和简介（B 站视频读标题、UP 主、时长、简介），转发的聊天记录展开成文字，txt / md / 代码这类小文件读前 2000 字。写成「[链接 …：…]」接在消息后面。不打开内网和本机地址；要登录才看得到的只说打不开"
+  },
+  "days_enabled": {
+    "description": "日子：告诉它今天是什么日子、外面天气怎么样",
+    "type": "bool",
+    "default": true,
+    "hint": "和你私聊时、它自己的时刻里，附上一句：几月几号星期几、农历、节气节日（含明天的），填了地方的话再加上天气。提不提由它"
+  },
+  "weather_place": {
+    "description": "天气：地方名",
+    "type": "string",
+    "default": "",
+    "hint": "比如「杭州」，空着就不说天气。天气来自 Open-Meteo（免费，不用 Key），每小时查一次"
+  },
+  "weather_coords": {
+    "description": "天气：经纬度",
+    "type": "string",
+    "default": "",
+    "hint": "「纬度,经度」，比如 30.26,120.14。空着就按地方名去查坐标（这台机器上地名查询可能连不上，最好直接填）"
+  },
   "group_context_lines": {
     "description": "群里被叫到时，带上群里最近几条消息",
     "type": "int",
