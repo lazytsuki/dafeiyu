@@ -2,7 +2,11 @@
 
 备份：插件数据（成长：自我认识、日记、对话流水、快照、心事）、各插件配置、
       AstrBot 主配置（打码）、runtime/local.bat。
-不备份：API Key / 密码 / token（统一打码）、QQ 登录态、AstrBot 聊天数据库。
+不备份：API Key / 密码 / token（统一打码）、QQ 登录态、AstrBot 聊天数据库（data_v4.db）。
+注意：插件自己的数据库照样在 plugin_data 里，比如 livingmemory 的 conversations.db 存着它记下的对话。
+
+插件数据里的 SQLite 数据库不按文件复制（机器人开着时直接复制可能拿到半截的），
+而是用 SQLite 自带的在线备份导出成单个 .db，-wal/-shm/-journal 不备份。
 
 私库地址写在 runtime/local.bat：set "BACKUP_REMOTE=https://github.com/<你>/<私库>.git"
 用法：python scripts/backup.py        （没有改动就不提交）
@@ -12,6 +16,7 @@ import datetime as dt
 import json
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNTIME = ROOT / "runtime"
 DATA = RUNTIME / "astrbot" / "data"
 DEST = RUNTIME / "backup"
+SQLITE_HEADER = b"SQLite format 3\x00"
+SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
 SECRET_KEY = re.compile(r"key|token|secret|password|passwd|jwt|cookie|credential", re.I)
 README = """# 私有备份
 
@@ -70,6 +77,40 @@ def copy_json_redacted(src: Path, dst: Path):
     dst.write_text(json.dumps(redact(data), ensure_ascii=False, indent=2), "utf-8")
 
 
+def sqlite_head(p: Path) -> bytes:
+    # 按文件头认 SQLite，不看扩展名；不是 SQLite 就返回空
+    try:
+        with open(p, "rb") as f:
+            head = f.read(100)
+    except OSError:
+        return b""
+    return head if head[:16] == SQLITE_HEADER and len(head) == 100 else b""
+
+
+def copy_data_file(src, dst):
+    head = sqlite_head(Path(src))
+    if not head:
+        return shutil.copy2(src, dst)
+    # 只读打开，用 SQLite 的在线备份拿一份一致的快照（还没合并进主文件的 WAL 内容也会带上）
+    uri = f"{Path(src).resolve().as_uri()}?mode=ro"
+    if head[18] == 2 and not Path(f"{src}-wal").exists():
+        # WAL 库但旁边没有 -wal：现在没人开着它。只读打开也会在原目录留下空的 -wal/-shm，所以按不可变文件读
+        uri += "&immutable=1"
+    source = sqlite3.connect(uri, uri=True)
+    target = sqlite3.connect(dst)
+    try:
+        source.backup(target)
+        target.execute("PRAGMA journal_mode=DELETE")  # 副本不用 WAL，就是一个自包含的 .db
+    finally:
+        target.close()
+        source.close()
+    return dst
+
+
+def skip_sidecars(_dir, names):
+    return [n for n in names if n.endswith(SQLITE_SIDECARS)]
+
+
 def git(*args, check=True) -> subprocess.CompletedProcess:
     exe = shutil.which("git") or r"C:\Program Files\Git\cmd\git.exe"
     return subprocess.run([exe, "-C", str(DEST), *args], check=check, capture_output=True, text=True, encoding="utf-8")
@@ -92,7 +133,7 @@ def sync():
             shutil.rmtree(p) if p.is_dir() else p.unlink()
     (DEST / "README.md").write_text(README, "utf-8")
     if (DATA / "plugin_data").exists():
-        shutil.copytree(DATA / "plugin_data", DEST / "plugin_data")
+        shutil.copytree(DATA / "plugin_data", DEST / "plugin_data", ignore=skip_sidecars, copy_function=copy_data_file)
     for cfg in (DATA / "config").glob("*.json"):
         copy_json_redacted(cfg, DEST / "config" / cfg.name)
     if (DATA / "cmd_config.json").exists():
