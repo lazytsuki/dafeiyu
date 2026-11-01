@@ -72,6 +72,8 @@ LivingMemory 记的是事实（「TA 下周面试」），`self.md` / `bond.md` 
 - **查资料**：`look_up` 用必应中文版搜一搜（不要 Key），`read_webpage` 点开读正文，一次一段。空闲时刻里也能选「查点什么」：搜完它想点开哪个就读一读，想记下的进成长流水。知乎、百度百科这类拦脚本访问的网页会显示打不开。`lookup_enabled` 可关。
 - **书架**：把 `.txt` / `.md` 放进 `runtime\astrbot\data\plugin_data\astrbot_plugin_dafeiyu\books\`（UTF-8 或 GBK 都行，文件名就是书名），它想读的时候用 `read_book` 读一段、记住读到哪；空闲时刻里也能选「读会儿书」，读完想记的话下次接着读时能看到。放什么书由 TA，读不读、读多快由它。
 - **给 TA 的说说点赞**：去空间看看的时刻里，看到 TA 的说说，除了评论也可以只点个赞。
+- **真的看视频**：`watch_video` 把一个 B 站视频认真看一遍——按时间截 6 张画面给看图模型看、听前 10 分钟的声音（硅基流动语音转文字，`video_listen_minutes` 可调）、按时间抽样弹幕、读热评。不用登录、不用 ffmpeg（画面来自 B 站的视频快照，声音是最低码率的音频流）。报告里写清楚看了几张画面、听了多久、哪些没拿到；字幕要登录才有，不取。只在和 TA 私聊或它自己的时刻能用；配套的逛 B 站插件里，它也可以挑一个点开的视频认真看（插件里有 `watch_for_wander` 给它用）。`video_enabled` 可关。
+- **答不答应由它**：聊天时每次都会告诉它，别人请它做的事（包括 TA 请的），可以答应，也可以说不想、改天，或者换个做法。
 - **自己的节奏**：每晚反思时它可以调整每天想找 TA 几次、什么时间段想找、到点打招呼的时刻、去空间看看的时刻。配置里的值只是起点，它写过的就按它的来（`/fy 状态` 能看到现在的节奏）；TA 的免打扰时段和各项上限始终有效。`rhythm_self` 可关。
 - **花销预算**：`daily_budget` 设了以后，当天花销估算超了，它自发的事（看空间、主动私聊、逛 B 站微博）先停；回消息、补做答应过的事不受影响。
 - **发得出去才算在线**：用 NapCat 的 `get_status` 判断 QQ 是否真的在线（被挤下线时登录信息还拿得到，消息却发不出去）；主动发消息失败会记下来，`/fy 状态` 里能看到。
@@ -97,7 +99,7 @@ LivingMemory 记的是事实（「TA 下周面试」），`self.md` / `bond.md` 
 | `plugins/astrbot_plugin_dafeiyu/draw.py`、`outbox.py`、`plans.py` | 画图（硅基流动）、主动消息里的语音 / 表情包、它自己的小本子 |
 | `plugins/astrbot_plugin_dafeiyu/vision.py`、`groupctx.py`、`wishes.py`、`freetime.py`、`guard.py` | 看图、群里最近的消息、心愿单、空闲时刻、防循环保险 |
 | `plugins/astrbot_plugin_dafeiyu/days.py`、`links.py`、`forwards.py`、`works.py` | 日子和天气、打开链接和卡片、转发和文本文件、自己的作品 |
-| `plugins/astrbot_plugin_dafeiyu/mydays.py`、`lookup.py`、`books.py` | 它自己记下的日子、查资料、书架 |
+| `plugins/astrbot_plugin_dafeiyu/mydays.py`、`lookup.py`、`books.py`、`video.py` | 它自己记下的日子、查资料、书架、看视频 |
 | `plugins/astrbot_plugin_dafeiyu/senses.py` | 把表情、戳一戳、语音翻译成它能看到的文字 |
 | `plugins.lock.json` | 社区插件清单（长期记忆等，路线图第二步再接） |
 | `scripts/` | Windows 安装/启动脚本 |
@@ -192,4 +194,5 @@ QQ 没连上时，插件不做任何要通过 QQ 的事（主动私聊、发说�
 - [x] 看得见图片、群聊上下文；心愿单；它自己定什么时候醒、醒了做什么（空闲时刻）
 - [x] 知道今天是什么日子（农历、节气节日、天气）；打得开链接、卡片、转发和文本文件；翻得到自己的作品
 - [x] 看看从前的自己、每月回想一次；自己记下的日子；好几天的事能接着做；查资料、书架；给 TA 的说说点赞
+- [x] 真的看视频（画面、声音、弹幕、热评）；答不答应由它
 - [ ] 迁移到云服务器

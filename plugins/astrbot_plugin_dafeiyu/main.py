@@ -20,7 +20,7 @@ from .growth import Growth, parse_back
 from .qzone import QzoneClient, QzoneError
 from astrbot.api.message_components import Record
 
-from . import books, days, draw, forwards, freetime, groupctx, guard, links, lookup, mydays, plans, rhythm, vision, voice, wishes, works
+from . import books, days, draw, forwards, freetime, groupctx, guard, links, lookup, mydays, plans, rhythm, video, vision, voice, wishes, works
 from .recall import search as recall_search
 from .senses import describe_message, plain_text
 from .outbox import split_out, take_pic
@@ -175,6 +175,9 @@ FREE_PROMPT = """现在是 {now}。{idle}
 - "next"：下次想在什么时候再有一段这样的空闲时间：写多少分钟以后（一个数字），或者一个时间（{formats}）。不填就是一两个小时以后；最短 5 分钟，最长 24 小时。
 做不做、做哪件、怎么做由你决定。
 只输出一个 JSON 对象：{example}"""
+
+# 聊天时每次都附上：别人（包括 TA）请它做的事，答不答应是它的选择
+CHOICE_NOTE = "\n\n（别人请你做的事，包括 TA 请你做的，你可以答应，也可以说不想、改天再说，或者换个做法——答不答应由你自己决定。）"
 
 READ_PROMPT = """你在读《{title}》，{where}。{notes}
 
@@ -1642,6 +1645,42 @@ class Dafeiyu(Star):
         )
         return f"查了「{question}」"
 
+    async def _watch(self, link: str) -> str:
+        """认真看一个 B 站视频（见 video.py），返回如实的报告。看不了抛 video.VideoError，里面是给它看的原因。"""
+        if not self.cfg.get("video_enabled", True):
+            raise video.VideoError("现在看不了视频")
+        if self._paused("watch"):
+            raise video.VideoError(self._why_not("watch"))
+        if self._over_budget():
+            raise video.VideoError("今天的花销到预算了")
+        link = str(link or "").strip()
+        if not video.find_bv(link)[0]:
+            urls = links.find_urls(link)
+            if not urls:
+                raise video.VideoError("没找到 B 站视频的链接或 BV 号")
+            try:  # b23.tv 这样的短链：先跟着跳转拿到真地址
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=links.TIMEOUT)) as s:
+                    link = (await links._get(s, urls[0]))[0]
+            except (links.LinkError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+                raise video.VideoError(f"链接打不开：{e}")
+        key, base = self._draw_key()
+        self._did("watch")
+        report, usage = await video.watch(
+            link, key, base, self.cfg.get("vision_model", "") or vision.DEFAULT_MODEL,
+            int(self.cfg.get("video_listen_minutes", 10) or 10),
+        )
+        self._count_see_usage(usage["see"])
+        self.store.save()
+        return report
+
+    async def watch_for_wander(self, bvid: str) -> str:
+        """给「逛 B 站」插件用：认真看一个视频，看不了返回空串（那边照原来只看标题简介）。"""
+        try:
+            return await self._watch(bvid)
+        except Exception as e:
+            logger.info(f"[大肥鱼] 逛的时候想认真看 {bvid}，没看成：{e}")
+            return ""
+
     async def _send_picture_owner(self, name: str, note: str) -> bool:
         """把收藏里的一张图（它自己画的）发给 TA。"""
         umo = self.store["owner_umo"]
@@ -2087,7 +2126,7 @@ class Dafeiyu(Star):
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         # 它对自己的认识每晚都可能变，所以每次请求现拼
-        req.system_prompt = (req.system_prompt or "") + self._self_block()
+        req.system_prompt = (req.system_prompt or "") + self._self_block() + CHOICE_NOTE
         req.system_prompt += await self._pending_jobs(event.unified_msg_origin)
         self._drop_seen_images(event, req)
         if self._is_cron(event):
@@ -2134,6 +2173,7 @@ class Dafeiyu(Star):
             "- 觉得重要的日子，可以用 remember_day 记下，到了那天我会想起；划掉用 forget_day。\n"
             "- 小本子上要做好几天的事，做了一点可以用 note_progress 记下做到哪了，下次接着做。\n"
             "- 想知道什么，可以用 look_up 搜一搜、read_webpage 点开读。\n"
+            "- B 站视频想真的看一看（画面、声音、弹幕、热评），可以用 watch_video。\n"
             "- 书架上有书的话，可以用 read_book 读一段，会记住读到哪。"
             + (f"（我现在的声音：{self.store['voice']}）" if self.store["voice"] else "")
         )
@@ -2389,6 +2429,25 @@ class Dafeiyu(Star):
             listed = plans.listing(self.store["plans"], time.time()) if event.is_private_chat() else ""
             return f"小本子上没有编号 {plan_id}。" + (f"现在记着的：\n{listed}" if listed else "")
         return f"记下了。「{p['what'][:40]}」现在有 {len(p['progress'])} 笔进度。"
+
+    @filter.llm_tool(name="watch_video")
+    async def watch_video(self, event: AstrMessageEvent, link: str):
+        """认真看一个 B 站视频：按时间截几张画面看、听一段声音（机器转写）、读弹幕和热评。比只看标题简介知道得多，也更花时间和钱，想看的时候再用。
+
+        Args:
+            link(string): 视频链接（b23.tv 短链也行）或 BV 号
+        """
+        if not self._own_moment(event):
+            return "这个我自己想看的时候再看。"
+        try:
+            report = await self._watch(link)
+        except video.VideoError as e:
+            return f"没看成：{e}"
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            return f"没看成：网络出了点问题（{e.__class__.__name__}）"
+        title = report.splitlines()[0]
+        self.growth.log("我（认真看了一个视频）", title)
+        return report
 
     @filter.llm_tool(name="look_up")
     async def look_up(self, event: AstrMessageEvent, query: str):

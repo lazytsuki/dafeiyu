@@ -191,6 +191,18 @@
     "default": true,
     "hint": "私聊里、或在群里叫到它时：网址和分享卡片读标题和简介（B 站视频读标题、UP 主、时长、简介），转发的聊天记录展开成文字，txt / md / 代码这类小文件读前 2000 字。写成「[链接 …：…]」接在消息后面。不打开内网和本机地址；要登录才看得到的只说打不开"
   },
+  "video_enabled": {
+    "description": "看视频：B 站视频能真的看一遍（截几张画面、听一段声音、读弹幕和热评）",
+    "type": "bool",
+    "default": true,
+    "hint": "不用登录、不用 ffmpeg。画面用看图模型、声音用硅基流动的语音转文字（同一个 Key）。和 TA 私聊、它自己的时刻里是 watch_video 工具；逛 B 站时也能挑一个认真看。"
+  },
+  "video_listen_minutes": {
+    "description": "看视频时最多听前几分钟",
+    "type": "int",
+    "default": 10,
+    "hint": "更长的视频只听开头这么久，报告里会写明听了多久。"
+  },
   "lookup_enabled": {
     "description": "查资料：它好奇的时候能自己搜一搜、点开网页读一读",
     "type": "bool",
