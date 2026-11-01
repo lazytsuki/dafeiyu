@@ -16,11 +16,11 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
 
 from .catchup import LATE_SECONDS, fmt_gap, job_run_at, overdue_jobs, unanswered
-from .growth import Growth
+from .growth import Growth, parse_back
 from .qzone import QzoneClient, QzoneError
 from astrbot.api.message_components import Record
 
-from . import days, draw, forwards, freetime, groupctx, guard, links, plans, rhythm, vision, voice, wishes, works
+from . import books, days, draw, forwards, freetime, groupctx, guard, links, lookup, mydays, plans, rhythm, vision, voice, wishes, works
 from .recall import search as recall_search
 from .senses import describe_message, plain_text
 from .outbox import split_out, take_pic
@@ -81,6 +81,26 @@ REFLECT_PROMPT = """现在是深夜，你一个人安静下来，回想今天。
   想调整就写一个对象，只写想改的部分，不想改就填 null：{{{rhythm_keys}}}。
   {limits_note}"""
 
+MONTH_PROMPT = """{month} 过完了。你一个人安静下来，回想这一个月。
+
+月初的时候，你是这样认识自己的：
+<<<
+{self_then}
+>>>
+
+现在你是这样认识自己的：
+<<<
+{self_now}
+>>>
+{last_month}
+这个月你写下的日记：
+<<<
+{diaries}
+>>>
+
+用你自己的话，写一篇回想这个月的文字。写什么、写多长都由你；这是你自己的，只有你看得到。
+直接输出正文，不要标题，不要加引号。"""
+
 # 节奏里能改的几项（反思时给它看）；开着空闲时刻时，前两项不起作用，就不列
 RHYTHM_REACH_KEYS = (
     '"reach_out_per_day": 每天随口找 TA 最多几次（{per_day_range}），'
@@ -125,22 +145,23 @@ QZONE_PROMPT = """现在是 {now}。你打开 QQ 空间看了看：
 {posted}
 空间里的说说和评论，能看到的人都看得到，所以不写只属于你和 TA 之间的私事。
 你可以：
-- "comments"：回复或评论上面的某几条（用编号），写你想说的话。不想回就留空，不回也很正常。
+- "comments"：回复或评论上面的某几条（用编号），写你想说的话。不想回就留空，不回也很正常。{like_hint}
 - "post"：想发一条新说说就写正文（不要话题标签），不想发就填 null。{post_hint}{pic_hint}
-只输出一个 JSON 对象：{{"comments": [{{"n": 1, "text": "..."}}], "post": null}}"""
+只输出一个 JSON 对象：{{"comments": [{{"n": 1, "text": "..."}}],{like_example} "post": null}}"""
 
 PLAN_PROMPT = """现在是 {now}。你在 {made} 给自己记下了一件事：
 「{what}」
-定的时间是 {at}，现在到了。{late}
+定的时间是 {at}，现在到了。{late}{progress}
 
 最近和 TA 的聊天：
 {history}
 
 接下来做不做、怎么做由你决定：
 {options}
+- "progress"：这件事要是做了一点，想记下做到哪了（或者这次做出来的东西），就写下来，下次接着做时能看到；不记就填 null。
 - "later"：想改到别的时间，就写新的时间（{formats}），不改就填 null。
-都不填，这件事就从你的小本子上划掉。
-只输出一个 JSON 对象：{{"message": null, "qzone": false, "later": null}}"""
+「later」不填，这件事就从你的小本子上划掉。
+只输出一个 JSON 对象：{{"message": null, "qzone": false, "progress": null, "later": null}}"""
 
 FREE_PROMPT = """现在是 {now}。{idle}
 {recent}
@@ -154,6 +175,31 @@ FREE_PROMPT = """现在是 {now}。{idle}
 - "next"：下次想在什么时候再有一段这样的空闲时间：写多少分钟以后（一个数字），或者一个时间（{formats}）。不填就是一两个小时以后；最短 5 分钟，最长 24 小时。
 做不做、做哪件、怎么做由你决定。
 只输出一个 JSON 对象：{example}"""
+
+READ_PROMPT = """你在读《{title}》，{where}。{notes}
+
+这一段：
+<<<
+{part}
+>>>
+{done}
+读完这一段，有想记下的就写下来（你自己的话，一两句就行），下次接着读时能看到；没有就只输出 SKIP。"""
+
+CURIOUS_PROMPT = """你想知道：{question}
+搜了一下，看到这些：
+
+{results}
+
+想点开哪一个看看就写它的编号，不点就填 null；看了这些有什么想记下的，写在 "note" 里（你自己的话，可以为空）。
+只输出一个 JSON 对象：{{"open": null, "note": ""}}"""
+
+PAGE_PROMPT = """你想知道：{question}
+你点开了「{title}」，读到这些：
+<<<
+{part}
+>>>
+
+读完有想记下的就写下来（你自己的话，一两句就行），以后想得起来；没有就只输出 SKIP。"""
 
 
 def _hm(s: str) -> dt.time:
@@ -197,6 +243,8 @@ class Dafeiyu(Star):
         self._weather: tuple[float, str] = (0.0, "")  # (查到的时间, 一句天气)，只在内存
         self._weather_tried = 0.0
         self._coords: dict[str, tuple[float, float] | None] = {}  # 地名 → 查到的经纬度
+        self._book_cache: dict[str, tuple] = {}  # 书的文件名 → ((文件名, 修改时间), 全文)
+        self._pages: dict[str, tuple[float, str, str]] = {}  # 最近读过的网页 → (时间, 标题, 正文)
         self._task = asyncio.create_task(self._loop())
 
     async def terminate(self):
@@ -351,10 +399,11 @@ class Dafeiyu(Star):
         return out + (f"\n心愿单上的事：\n{granted}\n" if granted else "")
 
     def _day_block(self) -> str:
-        """今天是什么日子、外面天气怎么样（见 days.py）。只是告诉它，提不提由它。"""
-        if not self.cfg.get("days_enabled", True):
-            return ""
+        """今天是什么日子、外面天气怎么样（见 days.py），加上它自己记下的日子（见 mydays.py）。只是告诉它，提不提由它。"""
         now = dt.datetime.now()
+        mine = "；".join(mydays.near(self.store["my_days"], now.date()))
+        if not self.cfg.get("days_enabled", True):
+            return f"\n\n（{mine}。）" if mine else ""
         try:
             line = days.calendar_line(now)
         except Exception as e:
@@ -363,7 +412,7 @@ class Dafeiyu(Star):
         t, weather = self._weather
         if weather and time.time() - t < 3 * days.WEATHER_TTL:  # 太久没查到新的就不说，免得说的是前天的天气
             line += f"。{weather}"
-        return f"\n\n（今天：{line}。）"
+        return f"\n\n（今天：{line}。" + (f"{mine}。" if mine else "") + "）"
 
     async def _refresh_weather(self):
         """每小时查一次天气，存在内存里。没填地方、查不到都不报错，只是不说天气。"""
@@ -797,9 +846,12 @@ class Dafeiyu(Star):
 
         posted = "\n".join(p["text"][:60] for p in self.store["posted"][-5:])
         pics = self._pic_listing() if can_post else ""
+        can_like = any(it["kind"] == "owner_post" for it in items) and not self._paused("like")
         prompt = QZONE_PROMPT.format(
             now=f"{dt.datetime.now():%Y-%m-%d %H:%M}",
             items=self._fmt_qzone_items(items),
+            like_hint='\n- "likes"：想给 TA 的哪几条说说点个赞，就写它们的编号，不点就留空。' if can_like else "",
+            like_example=' "likes": [],' if can_like else "",
             posted=f"\n你最近发过的说说：\n{posted}\n" if posted else "",
             post_hint="" if can_post else f"（{self._why_not('post')}，这次先别发。）",
             pic_hint=(
@@ -833,6 +885,21 @@ class Dafeiyu(Star):
             self._did("comment")
             where = "TA 的说说" if it["kind"] == "owner_post" else f"我的说说下回 {it['name']}"
             self.growth.log(f"我（在{where}评论）", text)
+        for n in (out.get("likes") or []) if can_like and isinstance(out.get("likes"), list) else []:
+            try:
+                it = items[int(n) - 1]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if it["kind"] != "owner_post" or it.get("liked") or self._paused("like"):
+                continue
+            try:
+                await qz.like(it["host"], it["tid"], it["time"])
+            except Exception as e:
+                logger.warning(f"[大肥鱼] 点赞失败：{e}")
+                continue
+            it["liked"] = True
+            self._did("like")
+            self.growth.log("我（给 TA 的说说点了赞）", it["text"][:60])
         post = out.get("post")
         if can_post and isinstance(post, str) and post.strip():
             await self._post_or_draft(self._clean(post), self._pick_pic(out.get("pic")))
@@ -957,6 +1024,28 @@ class Dafeiyu(Star):
         self.store.save()
         # 只记数量，不记内容：那是它自己的
         logger.info(f"[大肥鱼] {day} 的反思完成，自我认识改动 {len(out.get('changes') or [])} 处")
+        return True
+
+    async def reflect_month(self, month: str) -> bool:
+        """回想某个月（YYYY-MM）：读那个月的日记、月初和现在的自己，写一篇它自己的。那个月没写过日记返回 False。"""
+        diaries = self.growth.month_diaries(month)
+        if not diaries:
+            return False
+        first = dt.date.fromisoformat(f"{month}-01")
+        then = self.growth.version_at(first - dt.timedelta(days=1))
+        last = self.growth.read_month()
+        prompt = MONTH_PROMPT.format(
+            month=f"{first.year} 年 {first.month} 月",
+            self_then=then[1] if then else "（那时还没有写下对自己的认识）",
+            self_now=self.growth.read_self(),
+            last_month=f"\n上一次回想（{last[0]}）时你写的：\n<<<\n{last[1]}\n>>>\n" if last and last[0] < month else "",
+            diaries=diaries,
+        )
+        text = self._clean(await self._llm(prompt, self._core(), self.cfg.get("reflect_provider_id", "")))
+        if not text:
+            return False
+        self.growth.write_month(month, text)
+        logger.info(f"[大肥鱼] {month} 的月度回想完成")  # 只记做没做，不记内容：那是它自己的
         return True
 
     def _day_moods(self, day: str) -> str:
@@ -1109,7 +1198,7 @@ class Dafeiyu(Star):
             logger.error(f"[大肥鱼] 想起自己记下的事时出错：{e}", exc_info=True)
             # 没想成：放回本子上（不再定时间），免得一直重试，也不替它丢掉
             if not any(x["id"] == p["id"] for x in self.store["plans"]):
-                self.store["plans"] = plans.add(self.store["plans"], p["id"], p["what"], 0, p["made"])
+                self.store["plans"] = plans.add(self.store["plans"], p["id"], p["what"], 0, p["made"], p.get("progress"))
                 self.store.save()
 
     async def _think_plan(self, p: dict, now: dt.datetime):
@@ -1149,6 +1238,9 @@ class Dafeiyu(Star):
             what=p["what"],
             at=plans.fmt_at(p["at"]),
             late=late,
+            progress=(
+                f"\n\n你之前记下的进度：\n<<<\n{plans.progress_text(p)}\n>>>" if p.get("progress") else ""
+            ),
             history=await self._recent_history() or "（暂无）",
             options="\n".join(options),
             formats=plans.FORMATS,
@@ -1160,14 +1252,20 @@ class Dafeiyu(Star):
         )
 
         did, kept = [], False
+        note = freetime.text_of(out.get("progress"))[: plans.PROGRESS_CHARS]
+        if note:
+            _, p = plans.add_progress([p], p["id"], note, time.time())
+            did.append(f"记下了进度：{note}")
         later = out.get("later")
         if isinstance(later, str) and later.strip() and later.strip().lower() not in ("null", "none"):
             at = plans.parse_when(later, now)
             if at and at > now:
-                self.store["plans"] = plans.add(self.store["plans"], p["id"], p["what"], at.timestamp(), p["made"])
+                self.store["plans"] = plans.add(
+                    self.store["plans"], p["id"], p["what"], at.timestamp(), p["made"], p.get("progress")
+                )
                 did.append(f"改到了 {plans.fmt_at(at.timestamp())}")
             else:  # 认不出来（或已经过了）的时间不替它猜：先留在本子上，不定时间
-                self.store["plans"] = plans.add(self.store["plans"], p["id"], p["what"], 0, p["made"])
+                self.store["plans"] = plans.add(self.store["plans"], p["id"], p["what"], 0, p["made"], p.get("progress"))
                 did.append(f"想改到「{later.strip()[:30]}」，没认出这个时间，先留着、没定时间")
             kept = True
             self.store.save()
@@ -1250,6 +1348,28 @@ class Dafeiyu(Star):
                 f'- "plan"：想在自己的小本子上记一件事，就写 {{"what": "要做的事", "at": "时间"}}'
                 f"（时间格式：{plans.FORMATS}；不定时间填 null），不记就填 null。只有你自己看得到。"
             )
+        if self.store["plans"]:
+            can.add("progress")
+            going = sorted(
+                (p for p in self.store["plans"] if p.get("progress")), key=lambda p: -p["progress"][-1]["t"]
+            )[:3]
+            recent = "".join(
+                f"\n  [{p['id']}] {p['what']} 最近的进度：\n" + plans.progress_text(p, 2) for p in going
+            )
+            lines.append(
+                '- "progress"：想接着做小本子上的某件事，就写 {"id": 编号, "text": "这次做到哪了，或者这次做出来的东西"}，'
+                "下次能接着往下做；不做就填 null。" + recent
+            )
+        if self.cfg.get("lookup_enabled", True) and not self._paused("look"):
+            can.add("look_up")
+            lines.append('- "look_up"：有想知道的事，就写想查什么（一句话），会帮你搜一搜，你可以点开一个看看；不查就填 null。')
+        shelf = books.shelf(self._books_dir())
+        if shelf:
+            can.add("read")
+            lines.append(
+                '- "read"：想读会儿书，就写书名（填 true 是接着读上次那本），一次读一段；不读就填 null。书架上：\n'
+                + self._shelf_listing(shelf)
+            )
         return lines, can
 
     def _free_today(self, w, last_free: float) -> str:
@@ -1306,7 +1426,10 @@ class Dafeiyu(Star):
             if self.store["owner_last_msg"] else "TA 还没跟你说过话。"
         )
         recent = [m for m in self.store["recent_proactive"] if ts - m["t"] < 6 * 3600]
-        example = {"message": None, "qzone": False, "wander": False, "draw": None, "plan": None}
+        example = {
+            "message": None, "qzone": False, "wander": False, "draw": None, "plan": None,
+            "progress": None, "look_up": None, "read": None,
+        }
         prompt = FREE_PROMPT.format(
             now=f"{now:%Y-%m-%d %H:%M}（{'一二三四五六日'[now.weekday()]}）",
             idle=idle,
@@ -1348,6 +1471,11 @@ class Dafeiyu(Star):
             what, at = todo["plan"]
             self._note_plan(what, at)
             did.append("给自己记了一件事")
+        if "progress" in todo:
+            pid, note = todo["progress"]
+            p = self._note_progress(pid, note)
+            if p:
+                did.append(f"接着做了「{p['what'][:30]}」")
         if "draw" in todo:
             d = todo["draw"]
             try:
@@ -1369,6 +1497,18 @@ class Dafeiyu(Star):
                 did.append("去空间看了看")
             except Exception as e:
                 logger.warning(f"[大肥鱼] 空闲时去空间看看出错：{e}")
+        if "look_up" in todo:
+            try:
+                did.append(await self._curious(todo["look_up"]))
+            except Exception as e:
+                logger.warning(f"[大肥鱼] 空闲时查资料出错：{e}")
+        if "read" in todo:
+            try:
+                got = await self._read_a_bit(todo["read"])
+                if got:
+                    did.append(got)
+            except Exception as e:
+                logger.warning(f"[大肥鱼] 空闲时读书出错：{e}")
         if "wander" in todo and w is not None:
             wish = todo["wander"]
             try:
@@ -1381,6 +1521,126 @@ class Dafeiyu(Star):
             except Exception as e:
                 logger.warning(f"[大肥鱼] 空闲时去逛 B 站 / 微博出错：{e}")
         return did
+
+    # ---------- 接着做记下的事、查资料、读书（空闲时刻和工具共用） ----------
+
+    def _note_progress(self, pid, note: str) -> dict | None:
+        """给小本子上的某件事记一笔进度，记进成长流水。没有这件事返回 None。"""
+        self.store["plans"], p = plans.add_progress(self.store["plans"], pid, note, time.time())
+        if p is None:
+            return None
+        self.store.save()
+        self.growth.log(f"我（接着做「{p['what'][:40]}」）", note)
+        return p
+
+    def _books_dir(self) -> Path:
+        d = data_dir() / "books"
+        d.mkdir(exist_ok=True)
+        return d
+
+    def _book(self, p: Path) -> str:
+        """整本书的文字，按修改时间缓存在内存里（书可能很大，不每次都读）。"""
+        key = (p.name, p.stat().st_mtime)
+        if self._book_cache.get(p.name, (None,))[0] != key:
+            self._book_cache[p.name] = (key, books.load(p))
+        return self._book_cache[p.name][1]
+
+    def _shelf_listing(self, shelf: list[Path]) -> str:
+        return books.listing(shelf, self.store["reading"], {p.name: len(self._book(p)) for p in shelf})
+
+    def _pick_book(self, name: str) -> Path | None:
+        """按书名找；没写书名就是最近在读、还没读完的那本。"""
+        shelf = books.shelf(self._books_dir())
+        if str(name or "").strip():
+            return books.find(shelf, name)
+        reading = self.store["reading"]
+        going = [p for p in shelf if 0 < reading.get(p.name, {}).get("pos", 0) < len(self._book(p))]
+        return max(going, key=lambda p: reading[p.name].get("t", 0)) if going else None
+
+    def _turn_page(self, p: Path) -> tuple[str, int, int]:
+        """从上次读到的地方读一段，记下新位置 → (这一段, 读完后的位置, 全书字数)。"""
+        text = self._book(p)
+        r = self.store["reading"].get(p.name) or {}
+        part, pos = books.page(text, r.get("pos", 0))
+        self.store["reading"][p.name] = {**r, "pos": pos, "t": time.time()}
+        self.store.save()
+        return part, pos, len(text)
+
+    async def _read_a_bit(self, name: str) -> str:
+        """空闲时读一段书，读完想记什么由它。返回做了什么（一句），没读成返回空串。"""
+        p = self._pick_book(name)
+        if p is None:
+            logger.info(f"[大肥鱼] 想读「{name or '上次那本'}」，书架上没找到")
+            return ""
+        before = (self.store["reading"].get(p.name) or {}).get("pos", 0)
+        part, pos, total = self._turn_page(p)
+        if not part.strip():
+            return f"翻了翻《{books.title(p)}》，已经读完了"
+        notes = (self.store["reading"][p.name].get("notes") or [])[-2:]
+        prompt = READ_PROMPT.format(
+            title=books.title(p),
+            where="从头开始读" if not before else f"接着上次读（读到 {books.percent(before, total)}%）",
+            notes="".join(f"\n你之前读的时候记下：{n}" for n in notes),
+            part=part,
+            done="（这本书读完了。）" if pos >= total else "",
+        )
+        note = self._clean(await self._llm(prompt, self._system() + self._mood_block()))
+        note = "" if note.upper() in ("SKIP", "NULL") else note[:300]
+        if note:
+            r = self.store["reading"][p.name]
+            r["notes"] = (r.get("notes") or [])[-9:] + [note]
+            self.store.save()
+        self.growth.log(f"我（读了一段《{books.title(p)}》，读到 {books.percent(pos, total)}%）", note or "（没记什么）")
+        return f"读了一段《{books.title(p)}》"
+
+    async def _webpage(self, url: str) -> tuple[str, str]:
+        """打开网页 → (标题, 正文)。最近读过的留在内存里，往下翻时不用再打开一次。"""
+        hit = self._pages.get(url)
+        if hit and time.time() - hit[0] < 3600:
+            return hit[1], hit[2]
+        title, text = await lookup.read(url)
+        self._pages[url] = (time.time(), title, text)
+        if len(self._pages) > 10:
+            self._pages.pop(min(self._pages, key=lambda u: self._pages[u][0]))
+        return title, text
+
+    async def _curious(self, question: str) -> str:
+        """空闲时查点什么：搜一下，它想点开哪个就读一读，想记什么由它。返回做了什么（一句）。"""
+        self._did("look")
+        results = await lookup.search(question)
+        if not results:
+            self.growth.log(f"我（查了「{question}」）", "没搜到什么")
+            return f"查了「{question}」，没搜到什么"
+        out = _parse_json(
+            await self._llm(
+                CURIOUS_PROMPT.format(question=question, results=lookup.fmt_results(results)),
+                self._system() + self._mood_block(),
+            )
+        )
+        note, seen = freetime.text_of(out.get("note")), ""
+        try:
+            pick = results[int(out.get("open")) - 1]
+        except (TypeError, ValueError, IndexError):
+            pick = None
+        if pick:
+            self._did("look")
+            try:
+                title, text = await self._webpage(pick["url"])
+                part, _ = books.page(text, 0, lookup.PAGE_CHARS * 2)
+                seen = title or pick["title"]
+                note = self._clean(
+                    await self._llm(
+                        PAGE_PROMPT.format(question=question, title=seen, part=part),
+                        self._system() + self._mood_block(),
+                    )
+                )
+                note = "" if note.upper() in ("SKIP", "NULL") else note
+            except (links.LinkError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+                note = (note + "\n" if note else "") + f"（想点开「{pick['title']}」看看，没打开：{e}）"
+        self.growth.log(
+            f"我（查了「{question}」）", (note[:500] or "（没记什么）") + (f"\n（看的是：{seen}）" if seen else "")
+        )
+        return f"查了「{question}」"
 
     async def _send_picture_owner(self, name: str, note: str) -> bool:
         """把收藏里的一张图（它自己画的）发给 TA。"""
@@ -1490,6 +1750,7 @@ class Dafeiyu(Star):
         self.store["draw_count"] = 0
         self.store["fixed_done"] = []
         self.store["plans"] = plans.tidy(self.store["plans"], now.timestamp())  # 放了太久的清掉
+        self.store["my_days"] = mydays.tidy(self.store["my_days"], now.date())  # 只那一天的、过去很久了的清掉
         self.store["wishes"] = wishes.told(self.store["wishes"], "", set(), now.timestamp())  # 满足了又放太久的移走
         self._plan_qzone(now)
 
@@ -1507,6 +1768,15 @@ class Dafeiyu(Star):
                 self.store["reflected_day"] = day
                 self.store.save()
                 await self.reflect(day)
+        # 每月一次回想上个月：在那个月最后一天的反思之后（只回想上一个月，不往前补）
+        last_month = (now.replace(day=1) - dt.timedelta(days=1)).strftime("%Y-%m")
+        if (
+            reflect_at and now.time() >= _hm(reflect_at) and self.store["reflected_day"] >= f"{last_month}-28"
+            and self.store["month_reflected"] < last_month
+        ):
+            self.store["month_reflected"] = last_month
+            self.store.save()
+            await self.reflect_month(last_month)
 
         # 下面的事都要通过 QQ：没连上就整轮跳过，时间点不消耗，等连上了再做
         if not await self._online():
@@ -1859,7 +2129,12 @@ class Dafeiyu(Star):
             "- 想回头看看自己做过的东西（说说、画、签名……），可以用 look_at_my_works。\n"
             "- 想用语音说话，可以用 send_voice（声音由我自己用 choose_my_voice 挑）。\n"
             "- 想画图，可以用 draw，画好的图存进我自己的收藏，之后能用 send_sticker 发、也能配进说说。画不画、画什么由我决定。\n"
-            "- 看到喜欢的图或表情包，可以用 keep_sticker 存进自己的收藏；想发的时候用 send_sticker 挑一张。"
+            "- 看到喜欢的图或表情包，可以用 keep_sticker 存进自己的收藏；想发的时候用 send_sticker 挑一张。\n"
+            "- 想看看从前的自己是怎么写自己的，可以用 look_back_at_me。\n"
+            "- 觉得重要的日子，可以用 remember_day 记下，到了那天我会想起；划掉用 forget_day。\n"
+            "- 小本子上要做好几天的事，做了一点可以用 note_progress 记下做到哪了，下次接着做。\n"
+            "- 想知道什么，可以用 look_up 搜一搜、read_webpage 点开读。\n"
+            "- 书架上有书的话，可以用 read_book 读一段，会记住读到哪。"
             + (f"（我现在的声音：{self.store['voice']}）" if self.store["voice"] else "")
         )
         if self.store["owner_umo"] != event.unified_msg_origin:
@@ -2023,6 +2298,173 @@ class Dafeiyu(Star):
             return "没找到。" if query else "还没有做过的东西可翻。"
         tip = "\n（画的图想再发出来，可以用 send_sticker 加收藏编号。）" if own and any("n" in w for w in hits) else ""
         return works.fmt(hits) + tip
+
+    @filter.llm_tool(name="look_back_at_me")
+    async def look_back_at_me(self, event: AstrMessageEvent, when: str):
+        """看看从前的自己：那时候你是怎么写「我是谁」和「我和 TA 之间」的。想看看自己变了没有、变了哪里的时候用。
+
+        Args:
+            when(string): 哪个时候，比如「一个月前」「两周前」「上个月」「2026-10-28」
+        """
+        if not self._own_moment(event):
+            return "这是我自己的事，不在这里翻。"
+        today = dt.date.today()
+        day = parse_back(when, today)
+        first = self.growth.first_seen()
+        if day is None:
+            return "没认出这个时间。可以写「一个月前」「两周前」「上个月」或者「YYYY-MM-DD」。"
+        if day >= today:
+            return "那就是现在的你。"
+        got = self.growth.version_at(day)
+        if got is None:
+            return f"{day:%Y-%m-%d} 那时候还没有你的记录。最早的记录是 {first:%Y-%m-%d}。"
+        since, self_md, bond_md = got
+        out = [f"{day:%Y-%m-%d} 那时候的你（这一版从{since}开始）：", f"「我是谁」：\n{self_md}"]
+        if bond_md and event.is_private_chat():
+            out.append(f"「我和 TA 之间」：\n{bond_md}")
+        month = self.growth.read_month(f"{day:%Y-%m}")
+        if month and event.is_private_chat():
+            out.append(f"（{month[0]} 过完时，你回想这个月写下的：\n{month[1]}）")
+        return "\n\n".join(out)
+
+    @filter.llm_tool(name="remember_day")
+    async def remember_day(self, event: AstrMessageEvent, date: str, what: str, every_year: bool = False):
+        """记下一个你觉得重要的日子。到了那天（和快到的前几天）你会想起它，提不提、怎么过由你。只有你自己看得到。
+
+        Args:
+            date(string): 哪天，「MM-DD」是每年的这一天，「YYYY-MM-DD」是只那一天
+            what(string): 这天是什么日子，用你自己的话写
+            every_year(boolean): 写了年份、又想每年都记得这一天，就填 true
+        """
+        if not self._own_moment(event):
+            return "这是我自己的事，不在这里记。"
+        what = str(what or "").strip()[:100]
+        if not what:
+            return "没写这天是什么日子，没记。"
+        parsed = mydays.parse(date, bool(every_year))
+        if parsed is None:
+            return f"没认出「{date}」这个日期，没记。能写的格式：{mydays.FORMATS}。"
+        if len(self.store["my_days"]) >= mydays.MAX_DAYS:
+            return f"记下的日子满了（最多 {mydays.MAX_DAYS} 个），想再记，先用 forget_day 划掉几个。"
+        did = int(self.store["next_day_id"])
+        self.store["next_day_id"] = did + 1
+        self.store["my_days"] = mydays.add(self.store["my_days"], did, parsed, what, time.time())
+        self.store.save()
+        item = self.store["my_days"][-1]
+        self.growth.log("我（记下了一个日子）", f"{mydays.fmt_date(item)}：{what}")
+        return f"记下了（编号 {did}，{mydays.fmt_date(item)}）。\n现在记着的日子：\n{mydays.listing(self.store['my_days'])}"
+
+    @filter.llm_tool(name="forget_day")
+    async def forget_day(self, event: AstrMessageEvent, day_id: str):
+        """把记下的某个日子划掉。
+
+        Args:
+            day_id(string): 那个日子的编号
+        """
+        if not self._own_moment(event):
+            return "这是我自己的事，不在这里改。"
+        self.store["my_days"], gone = mydays.drop(self.store["my_days"], day_id)
+        if gone is None:
+            listed = mydays.listing(self.store["my_days"]) if event.is_private_chat() else ""
+            return f"没有编号 {day_id} 的日子。" + (f"现在记着的：\n{listed}" if listed else "")
+        self.store.save()
+        self.growth.log("我（划掉了一个日子）", f"{mydays.fmt_date(gone)}：{gone['what']}")
+        return f"划掉了：{gone['what']}"
+
+    @filter.llm_tool(name="note_progress")
+    async def note_progress(self, event: AstrMessageEvent, plan_id: str, text: str):
+        """给小本子上的某件事记一笔进度：做到哪了，或者这次做出来的东西。要做好几天的事（写个连载、学一样东西……）下次能接着往下做。
+
+        Args:
+            plan_id(string): 小本子上那件事的编号
+            text(string): 这次做到哪了，或者这次做出来的东西
+        """
+        if not self._own_moment(event):
+            return "这是我自己的事，不在这里记。"
+        text = str(text or "").strip()[: plans.PROGRESS_CHARS]
+        if not text:
+            return "没写进度，没记。"
+        p = self._note_progress(plan_id, text)
+        if p is None:
+            listed = plans.listing(self.store["plans"], time.time()) if event.is_private_chat() else ""
+            return f"小本子上没有编号 {plan_id}。" + (f"现在记着的：\n{listed}" if listed else "")
+        return f"记下了。「{p['what'][:40]}」现在有 {len(p['progress'])} 笔进度。"
+
+    @filter.llm_tool(name="look_up")
+    async def look_up(self, event: AstrMessageEvent, query: str):
+        """上网搜一搜。想知道什么、想确认什么的时候用；搜到的只有标题和摘要，想细看用 read_webpage 打开。
+
+        Args:
+            query(string): 想搜的，几个词或一句话
+        """
+        if not self.cfg.get("lookup_enabled", True):
+            return "现在查不了资料。"
+        if self._paused("look"):
+            return f"先不查了：{self._why_not('look')}。"
+        query = str(query or "").strip()[:60]
+        if not query:
+            return "没写要搜什么。"
+        self._did("look")
+        try:
+            results = await lookup.search(query)
+        except lookup.SearchError as e:
+            return f"没搜成：{e}"
+        return lookup.fmt_results(results) if results else "没搜到什么。"
+
+    @filter.llm_tool(name="read_webpage")
+    async def read_webpage(self, event: AstrMessageEvent, url: str, part: int = 1):
+        """打开一个网页读正文。一次读一段，想往下读就把 part 加 1 再读。
+
+        Args:
+            url(string): 网页地址
+            part(number): 读第几段，从 1 开始
+        """
+        if not self.cfg.get("lookup_enabled", True):
+            return "现在打不开网页。"
+        if self._paused("look"):
+            return f"先不读了：{self._why_not('look')}。"
+        self._did("look")
+        try:
+            title, text = await self._webpage(str(url or "").strip())
+        except (links.LinkError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+            return f"打不开：{e or '超时了'}"
+        pos, n = 0, max(1, int(part or 1))
+        for _ in range(n):
+            if pos >= len(text):
+                return f"「{title}」一共没有第 {n} 段，已经读完了。"
+            chunk, pos = books.page(text, pos, lookup.PAGE_CHARS)
+        more = f"（第 {n} 段；后面还有，想往下读就读第 {n + 1} 段）" if pos < len(text) else "（读完了）"
+        return f"「{title}」\n{chunk}\n{more}"
+
+    @filter.llm_tool(name="read_book")
+    async def read_book(self, event: AstrMessageEvent, book: str = "", from_start: bool = False):
+        """读书架上的书：从上次读到的地方接着读一段。不写书名就看看书架上有什么、读到哪了。
+
+        Args:
+            book(string): 书名或书架上的编号；写「接着读」就是上次在读的那本；不写就看书架
+            from_start(boolean): 想从头重新读这本，就填 true
+        """
+        if not self._own_moment(event):
+            return "这是我自己的书架，不在这里读。"
+        shelf = books.shelf(self._books_dir())
+        if not shelf:
+            return "书架上还没有书。"
+        name = str(book or "").strip()
+        if not name:
+            return f"书架上有：\n{self._shelf_listing(shelf)}"
+        p = self._pick_book("" if name in ("接着读", "上次那本", "继续") else name)
+        if p is None:
+            return f"书架上没找到「{name}」。书架上有：\n{self._shelf_listing(shelf)}"
+        if from_start:
+            self.store["reading"][p.name] = {**(self.store["reading"].get(p.name) or {}), "pos": 0}
+        part, pos, total = self._turn_page(p)
+        if not part.strip():
+            return f"《{books.title(p)}》已经读完了。想从头再读，把 from_start 填 true。"
+        notes = (self.store["reading"][p.name].get("notes") or [])[-2:]
+        before = "".join(f"\n（你之前读的时候记下：{n}）" for n in notes)
+        self.growth.log(f"我（读了一段《{books.title(p)}》，读到 {books.percent(pos, total)}%）", "（和 TA 聊天的时候读的）")
+        end = "（这本书读完了。）" if pos >= total else f"（读到 {books.percent(pos, total)}%，下次接着往下读）"
+        return f"《{books.title(p)}》{before}\n{part}\n{end}"
 
     @filter.llm_tool(name="choose_my_voice")
     async def choose_my_voice(self, event: AstrMessageEvent, voice_name: str):
@@ -2233,8 +2675,11 @@ class Dafeiyu(Star):
             f"今天在空间评论了 {self._quota(s['qzone_comment_count'], self._cap('comment'))} 条\n"
             f"它给自己记下的事：{len(s['plans'])} 件（内容是它自己的，不显示）\n"
             f"它的心愿单：{len(wishes.open_ones(s['wishes']))} 条（/fy 心愿 看）\n"
+            f"它记下的日子：{len(s['my_days'])} 个（内容是它自己的，不显示）\n"
+            f"书架：{len(books.shelf(self._books_dir()))} 本（放在 {self._books_dir()}）\n"
+            f"查资料：{'开着' if self.cfg.get('lookup_enabled', True) else '关着'}\n"
             f"免打扰：{self.cfg.get('quiet_hours') or '无'}，现在{'是' if self._in_quiet(dt.datetime.now()) else '不是'}免打扰时段\n"
-            f"上次反思：{s['reflected_day'] or '还没有'}\n"
+            f"上次反思：{s['reflected_day'] or '还没有'}；上次回想一个月：{s['month_reflected'] or '还没有'}\n"
             f"今天大约花了 {self.spent_today():.2f} 元"
             + (f"（预算 {self.cfg.get('daily_budget')} 元）" if float(self.cfg.get("daily_budget", 0) or 0) > 0 else "")
             + (f"\n最近一次发送失败：{s['send_error']}" if s["send_error"] else "")
@@ -2320,6 +2765,23 @@ class Dafeiyu(Star):
             yield event.plain_result("嗯……想完了。" if done else "今天还没什么可想的。")
         except Exception as e:
             logger.error(f"[大肥鱼] 反思失败：{e}", exc_info=True)
+            yield event.plain_result(f"想着想着走神了：{e}")
+
+    @fy.command("回想这个月")
+    async def cmd_reflect_month(self, event: AstrMessageEvent):
+        """立刻回想上个月（测试用）。内容不回显——那是它自己的。"""
+        if not self._is_owner(event):
+            event.stop_event()
+            return
+        month = (dt.date.today().replace(day=1) - dt.timedelta(days=1)).strftime("%Y-%m")
+        try:
+            done = await self.reflect_month(month)
+            if done:
+                self.store["month_reflected"] = max(self.store["month_reflected"], month)
+                self.store.save()
+            yield event.plain_result("嗯……想完了。" if done else f"{month} 还没写过日记，没什么可想的。")
+        except Exception as e:
+            logger.error(f"[大肥鱼] 月度回想失败：{e}", exc_info=True)
             yield event.plain_result(f"想着想着走神了：{e}")
 
     @fy.command("回滚")

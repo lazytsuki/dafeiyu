@@ -29,6 +29,8 @@ COMMENT_URL = (
     "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com"
     "/cgi-bin/emotion_cgi_re_feeds"
 )
+# 点赞（参数照开源实现 Maizone、qzone_ultra）
+LIKE_URL = "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
 # 说说配图：先把图传到相册，拿 pic_bo / richval 再随说说一起发（参数照开源实现 Maizone、qzone_ultra）
 UPLOAD_URL = "https://up.qzone.qq.com/cgi-bin/upload/cgi_upload_image"
 
@@ -199,6 +201,27 @@ class QzoneClient:
                 "private": "0",
                 "paramstr": "1",
                 "qzreferrer": f"https://user.qzone.qq.com/{self.uin}",
+            },
+        )
+
+    async def like(self, host_uin: str, tid: str, post_time: int) -> None:
+        """给某条说说点个赞。"""
+        key = f"http://user.qzone.qq.com/{host_uin}/mood/{tid}"
+        await self._post(
+            LIKE_URL,
+            {
+                "qzreferrer": f"https://user.qzone.qq.com/{self.uin}",
+                "opuin": self.uin,
+                "unikey": key,
+                "curkey": key,
+                "from": "1",
+                "appid": "311",
+                "typeid": "0",
+                "abstime": str(int(post_time)),
+                "fid": str(tid),
+                "active": "0",
+                "fupdate": "1",
+                "format": "json",
             },
         )
 

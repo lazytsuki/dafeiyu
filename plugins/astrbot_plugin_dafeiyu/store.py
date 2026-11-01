@@ -48,6 +48,10 @@ DEFAULT = {
     "next_wish_id": 1,
     "next_free": 0.0,         # 下次空闲时刻的时间戳（它自己在每次空闲时定，0 = 还没排过，见 freetime.py）
     "last_free": 0.0,         # 最近一次空闲时刻的时间（什么都没做也记在这里，不进成长流水）
+    "my_days": [],            # 它自己记下的日子 [{"id", "date": "MM-DD" 或 "YYYY-MM-DD", "what", "year"?, "made"}]（见 mydays.py）
+    "next_day_id": 1,
+    "month_reflected": "",    # 每月回想已经做到哪个月 YYYY-MM
+    "reading": {},            # 书架上每本书读到哪 {文件名: {"pos", "t", "notes": [读的时候记下的话]}}（见 books.py）
 }
 
 

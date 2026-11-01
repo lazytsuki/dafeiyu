@@ -63,6 +63,12 @@ def search(root: Path, query: str, limit: int = 8, context: int = 1) -> list[str
             if s >= 0.34:
                 hits.append((s, f.stem, f"{f.stem} 的日记：\n  {para.strip()[:300]}"))
 
+    for f in sorted((root / "months").glob("*.md")):  # 每月一次的回想
+        for para in f.read_text("utf-8").split("\n\n"):
+            s = _score(q, para)
+            if s >= 0.34:
+                hits.append((s, f.stem, f"{f.stem} 回想这个月时写的：\n  {para.strip()[:300]}"))
+
     hits.sort(key=lambda h: (-h[0], h[1]))
     picked, seen = [], set()
     for _, key, text in hits:
